@@ -19,6 +19,10 @@ from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 from django.db import transaction
 from rest_framework import serializers
+from typing import Dict, List, Tuple, Optional, Any
+from alerts.models import AlertType
+from alerts.services import AlertService
+from alerts.models import Alert
 
 import logging
 logger = logging.getLogger(__name__)
@@ -93,66 +97,42 @@ class SignUpView(APIView):
     @swagger_auto_schema(request_body=TechnicianProfileSerializer)
     def create_technician_profile(self, request, user):
         try:
-            with transaction.atomic():  # Add atomic transaction
-                # Validate required fields
-                specialization = request.data.get("specialization")
+            with transaction.atomic():
+                # Get and validate maintenance company first
                 maintenance_company_id = request.data.get("maintenance_company_id")
+                if not maintenance_company_id:
+                    return Response({"error": "Maintenance company ID is required"}, status=status.HTTP_400_BAD_REQUEST)
             
-                if not all([specialization, maintenance_company_id]):
-                    return Response(
-                        {"error": "Both specialization and maintenance_company_id are required."},
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
+                maintenance_company = MaintenanceCompanyProfile.objects.get(id=maintenance_company_id)
             
-                # Check if the Maintenance company exists
-                try:
-                    maintenance_company = Maintenance.objects.get(id=maintenance_company_id)
-                except Maintenance.DoesNotExist:
-                    return Response(
-                        {"error": f"Maintenance company with ID {maintenance_company_id} does not exist."},
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
+                # Create technician with explicit company assignment
+                technician_data = request.data.copy()
+                technician_data['maintenance_company'] = maintenance_company  # Make sure this relationship is set
+                technician_serializer = TechnicianProfileSerializer(data=technician_data)
             
-                # Check if user already has a technician profile
-                if hasattr(user, 'technician_profile'):
-                    return Response(
-                        {"error": "User already has a technician profile."},
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
+                if not technician_serializer.is_valid():
+                    return Response(technician_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
             
-                # Create Technician
-                technician_serializer = TechnicianProfileSerializer(data={
-                    'user': user.id,
-                    'specialization': specialization,
-                    'maintenance_company_id': maintenance_company.id
-                })
+                # Save technician with transaction
+                technician = technician_serializer.save()
             
-                if technician_serializer.is_valid():
-                    technician = technician_serializer.save()
-                
-                    # Create TechnicianProfile
-                    technician_profile = TechnicianProfile.objects.create(
-                        technician=technician
-                    )
-                
-                    # Return complete response with all related data
-                    return Response({
-                        "user": UserSerializer(user).data,
-                        "technician": TechnicianProfileSerializer(technician).data,
-                        "technician_profile": TechnicianProfileSerializer(technician_profile).data
-                    }, status=status.HTTP_201_CREATED)
-                else:
-                    return Response(
-                        technician_serializer.errors,
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
-                
+                # Create alert exactly like in the working view
+                alert = AlertService.create_alert(
+                    alert_type=AlertType.TECHNICIAN_SIGNUP,
+                    recipient=maintenance_company.user,  # Direct reference to company instance
+                    related_object=technician,      # Direct reference to technician instance
+                    message=f"New technician {technician.user.first_name} {technician.user.last_name} has signed up and requires approval"
+                )
+            
+                return Response({"message": "Technician profile created successfully"}, status=status.HTTP_201_CREATED)
+            
+        except MaintenanceCompanyProfile.DoesNotExist:
+            return Response({"error": "Maintenance company not found"}, status=status.HTTP_404_NOT_FOUND)
         except Exception as e:
-            return Response(
-                {"error": f"An error occurred: {str(e)}"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            ) 
-
+            logger.exception("Technician signup failed")
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR) 
+       
+ 
     @swagger_auto_schema(request_body=DeveloperProfileSerializer)
     def create_developer_profile(self, request, user):
         # Handle the developer user profile creation

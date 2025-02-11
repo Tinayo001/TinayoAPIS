@@ -1,9 +1,11 @@
+from freezegun import freeze_time
 from django.test import TestCase
 from django.urls import reverse
 from rest_framework.test import APIClient
 from rest_framework import status
 from datetime import datetime, timedelta
 import uuid
+import pytz  # To make the datetime timezone-aware
 
 from jobs.factories import (
     MaintenanceScheduleFactory,
@@ -32,21 +34,19 @@ class MaintenanceScheduleNullTechnicianFilterViewTests(TestCase):
         )
 
         # Create maintenance schedules with and without technicians
-        # Schedule with no technician
         self.schedule_no_tech = MaintenanceScheduleFactory(
             elevator=self.elevator,
             maintenance_company=self.maintenance_company,
             technician=None
         )
 
-        # Schedule with technician (shouldn't appear in results)
         self.schedule_with_tech = MaintenanceScheduleFactory(
             elevator=self.elevator,
             maintenance_company=self.maintenance_company,
             technician=self.technician
         )
 
-        self.url = reverse('unassigned-maintenance-schedules')
+        self.url = reverse('unassigned-maintenance-schedules') 
 
     def test_filter_by_developer(self):
         """Test filtering maintenance schedules by developer ID."""
@@ -80,9 +80,13 @@ class MaintenanceScheduleNullTechnicianFilterViewTests(TestCase):
 
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
+    @freeze_time("2024-02-10 12:00:00")  # Freeze time to a known point
     def test_filter_by_scheduled_date(self):
         """Test filtering maintenance schedules by scheduled date."""
-        specific_date = datetime.now().date()
+        # Create a schedule with today's date
+        current_time = datetime.now(pytz.UTC)
+        specific_date = current_time.replace(hour=0, minute=0, second=0, microsecond=0)
+        
         schedule = MaintenanceScheduleFactory(
             elevator=self.elevator,
             maintenance_company=self.maintenance_company,
@@ -90,12 +94,22 @@ class MaintenanceScheduleNullTechnicianFilterViewTests(TestCase):
             scheduled_date=specific_date
         )
 
+        MaintenanceScheduleFactory(
+            elevator=self.elevator,
+            maintenance_company=self.maintenance_company,
+            technician=None,
+            scheduled_date=specific_date + timedelta(days=1)
+        )
+
+        # Format the date as expected by the API
         data = {'scheduled_date': specific_date.strftime('%Y-%m-%d')}
         response = self.client.put(self.url, data, format='json')
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertTrue(any(s['id'] == str(schedule.id) for s in response.data))
-
+        self.assertTrue(len(response.data) > 0)
+        schedule_ids = [s['id'] for s in response.data]
+        self.assertIn(str(schedule.id), schedule_ids)
+     
     def test_filter_by_invalid_date_format(self):
         """Test filtering with invalid date format."""
         data = {'scheduled_date': '2024/01/30'}  # Wrong format
@@ -173,3 +187,4 @@ class MaintenanceScheduleNullTechnicianFilterViewTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(len(response.data) >= 1)
         self.assertTrue(all(s['technician'] is None for s in response.data))
+

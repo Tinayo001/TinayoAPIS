@@ -383,3 +383,5 @@ class BuildingLevelAdhocScheduleSerializer(serializers.ModelSerializer):
         building = obj.building
         developer = building.developer if building else None
         return {'id': str(developer.id), 'name': developer.developer_name} if developer else None
+
+

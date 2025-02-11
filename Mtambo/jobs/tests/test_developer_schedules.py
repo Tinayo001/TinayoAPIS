@@ -2,6 +2,9 @@ from uuid import uuid4
 from django.test import TestCase
 from rest_framework import status
 from django.urls import reverse
+from datetime import datetime
+from django.utils import timezone
+
 from account.models import User
 from developers.models import DeveloperProfile
 from buildings.models import Building
@@ -78,7 +81,7 @@ class DeveloperMaintenanceSchedulesViewTest(TestCase):
             elevator=self.elevator,
             technician=self.technician,
             maintenance_company=self.maintenance_company,
-            scheduled_date="2025-02-01 10:00:00",
+            scheduled_date=timezone.make_aware(datetime(2025, 2, 1, 10, 0)),  # Proper datetime object
             next_schedule="1_month",
             description="Routine maintenance",
             status="scheduled"
@@ -89,7 +92,7 @@ class DeveloperMaintenanceSchedulesViewTest(TestCase):
             elevator=self.elevator,
             technician=self.technician,
             maintenance_company=self.maintenance_company,
-            scheduled_date="2025-02-01 12:00:00",
+            scheduled_date=timezone.make_aware(datetime(2025, 2, 1, 12, 0)),  # Proper datetime object
             description="Emergency repair",
             status="scheduled"
         )
@@ -120,8 +123,6 @@ class DeveloperMaintenanceSchedulesViewTest(TestCase):
         self.assertEqual(regular_schedules[0]["maintenance_schedule"]["description"], "Routine maintenance")
         self.assertEqual(len(adhoc_schedules), 1)
         self.assertEqual(adhoc_schedules[0]["maintenance_schedule"]["description"], "Emergency repair")
-     
-     
 
     def test_developer_not_found(self):
         """

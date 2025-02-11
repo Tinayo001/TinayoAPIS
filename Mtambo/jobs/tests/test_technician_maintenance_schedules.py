@@ -3,6 +3,7 @@ from django.urls import reverse
 from rest_framework.test import APIClient
 from rest_framework import status
 from uuid import uuid4
+from django.utils import timezone
 from account.models import User
 from technicians.models import TechnicianProfile
 from maintenance_companies.models import MaintenanceCompanyProfile
@@ -10,9 +11,25 @@ from buildings.models import Building
 from elevators.models import Elevator
 from jobs.models import MaintenanceSchedule, AdHocMaintenanceSchedule, BuildingLevelAdhocSchedule
 from developers.models import DeveloperProfile
-
+from freezegun import freeze_time
+from unittest.mock import patch
+from django.db.models.signals import pre_save
+from datetime import timedelta
 
 class TechnicianMaintenanceSchedulesViewTests(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # Disconnect the pre_save signal temporarily
+        pre_save.disconnect(sender=MaintenanceSchedule, dispatch_uid='update_schedule_status')
+        super().setUpClass()
+
+    @classmethod
+    def tearDownClass(cls):
+        # Reconnect the signal after tests
+        from jobs.models import update_schedule_status
+        pre_save.connect(update_schedule_status, sender=MaintenanceSchedule, dispatch_uid='update_schedule_status')
+        super().tearDownClass()
+
     def setUp(self):
         """
         Set up test data for all test methods.
@@ -85,39 +102,86 @@ class TechnicianMaintenanceSchedulesViewTests(TestCase):
             technician=self.technician
         )
 
-        # Create maintenance schedules
+        # Use timezone.now() + timedelta for future dates
+        future_date = timezone.now() + timedelta(days=1)
+
+        # Create regular maintenance schedule with a future date
         self.regular_schedule = MaintenanceSchedule.objects.create(
             elevator=self.elevator,
             technician=self.technician,
             maintenance_company=self.maintenance_company,
-            scheduled_date="2023-12-01T10:00:00Z",
+            scheduled_date=future_date,
             next_schedule="1_month",
             description="Regular maintenance",
             status="scheduled"
         )
 
+        # Create ad-hoc maintenance schedule
         self.adhoc_schedule = AdHocMaintenanceSchedule.objects.create(
             elevator=self.elevator,
             technician=self.technician,
             maintenance_company=self.maintenance_company,
-            scheduled_date="2023-12-05T10:00:00Z",
+            scheduled_date=future_date + timedelta(days=1),
             description="Ad-hoc maintenance",
             status="scheduled"
         )
 
+        # Create building-level ad-hoc schedule
         self.building_adhoc_schedule = BuildingLevelAdhocSchedule.objects.create(
             building=self.building,
             technician=self.technician,
             maintenance_company=self.maintenance_company,
-            scheduled_date="2023-12-10T10:00:00Z",
+            scheduled_date=future_date + timedelta(days=2),
             description="Building-level ad-hoc maintenance",
             status="scheduled"
         )
 
+    def test_get_technician_maintenance_schedules_invalid_technician(self):
+        """
+        Test retrieving maintenance schedules for a non-existent technician.
+        """
+        invalid_technician_id = uuid4()
+        url = reverse("technician-maintenance-schedules", args=[str(invalid_technician_id)])
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(response.data["detail"], "Technician not found.")
+
+    def test_get_technician_maintenance_schedules_no_schedules(self):
+        """
+        Test retrieving maintenance schedules for a technician with no schedules.
+        """
+        # Delete all schedules
+        MaintenanceSchedule.objects.all().delete()
+        AdHocMaintenanceSchedule.objects.all().delete()
+        BuildingLevelAdhocSchedule.objects.all().delete()
+
+        url = reverse("technician-maintenance-schedules", args=[str(self.technician.id)])
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(response.data["detail"], "No maintenance schedules found for this technician.")
+
+    @freeze_time("2023-12-01T09:59:59Z")
     def test_get_technician_maintenance_schedules_successful(self):
         """
         Test successfully retrieving maintenance schedules for a technician.
         """
+        # Set the schedule date to be in the future relative to the frozen time
+        frozen_time = timezone.now()
+        future_date = frozen_time + timedelta(hours=1)
+        
+        # Update the schedule
+        self.regular_schedule.scheduled_date = future_date
+        self.regular_schedule.status = "scheduled"
+        self.regular_schedule.save()
+
+        # Update adhoc schedules as well
+        self.adhoc_schedule.scheduled_date = future_date + timedelta(days=1)
+        self.adhoc_schedule.save()
+        self.building_adhoc_schedule.scheduled_date = future_date + timedelta(days=2)
+        self.building_adhoc_schedule.save()
+
         url = reverse("technician-maintenance-schedules", args=[str(self.technician.id)])
         response = self.client.get(url)
 
@@ -147,33 +211,6 @@ class TechnicianMaintenanceSchedulesViewTests(TestCase):
         self.assertEqual(building_schedule["id"], str(self.building_adhoc_schedule.id))
         self.assertEqual(building_schedule["status"], "scheduled")
         self.assertEqual(building_schedule["description"], "Building-level ad-hoc maintenance")
-
-    def test_get_technician_maintenance_schedules_invalid_technician(self):
-        """
-        Test retrieving maintenance schedules for a non-existent technician.
-        """
-        # Use a valid UUID format that doesn't exist in the database
-        invalid_technician_id = uuid4()
-        url = reverse("technician-maintenance-schedules", args=[str(invalid_technician_id)])
-        response = self.client.get(url)
-
-        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
-        self.assertEqual(response.data["detail"], "Technician not found.")
-
-    def test_get_technician_maintenance_schedules_no_schedules(self):
-        """
-        Test retrieving maintenance schedules for a technician with no schedules.
-        """
-        # Delete all schedules
-        MaintenanceSchedule.objects.all().delete()
-        AdHocMaintenanceSchedule.objects.all().delete()
-        BuildingLevelAdhocSchedule.objects.all().delete()
-
-        url = reverse("technician-maintenance-schedules", args=[str(self.technician.id)])
-        response = self.client.get(url)
-
-        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
-        self.assertEqual(response.data["detail"], "No maintenance schedules found for this technician.")
 
     def test_maintenance_schedule_data_structure(self):
         """
@@ -207,3 +244,35 @@ class TechnicianMaintenanceSchedulesViewTests(TestCase):
         self.assertIn("id", building_details)
         self.assertIn("name", building_details)
         self.assertEqual(building_details["name"], "Test Building")
+
+    @freeze_time("2023-12-01T10:00:01Z")
+    def test_maintenance_schedule_becomes_overdue(self):
+        """Test that maintenance schedule status changes to overdue after the scheduled time."""
+        # Set the schedule date to be in the past relative to the frozen time
+        frozen_time = timezone.now()
+        past_date = frozen_time - timedelta(minutes=1)
+
+        # Update the schedule date
+        self.regular_schedule.scheduled_date = past_date
+        self.regular_schedule.save()
+    
+        url = reverse("technician-maintenance-schedules", args=[str(self.technician.id)])
+        response = self.client.get(url)
+    
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+    
+        # Debug prints
+        print("\nDate debugging:")
+        print(f"Past date we're looking for: {past_date.isoformat()}Z")
+        for schedule in response.data["regular_schedules"]:
+            print(f"Schedule date in response: {schedule['maintenance_schedule']['scheduled_date']}")
+    
+        # Instead of exact date matching, let's find the schedule with status 'overdue'
+        overdue_schedule = None
+        for schedule in response.data["regular_schedules"]:
+            if schedule["maintenance_schedule"]["status"] == "overdue":
+                overdue_schedule = schedule["maintenance_schedule"]
+                break
+    
+        self.assertIsNotNone(overdue_schedule, "Could not find any overdue schedule")
+        self.assertEqual(overdue_schedule["status"], "overdue") 

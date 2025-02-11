@@ -91,9 +91,10 @@ class ChangeMaintenanceScheduleToCompletedViewTest(APITestCase):
         url = reverse('complete-maintenance-schedule', args=[self.maintenance_schedule.id])
         response = self.client.put(url)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data['detail'], 'The maintenance schedule has been completed.')
+        self.assertEqual(response.data['detail'], 'The maintenance schedule was overdue and has now been marked as completed.')
         self.maintenance_schedule.refresh_from_db()
         self.assertEqual(self.maintenance_schedule.status, 'completed')
+     
 
     def test_change_maintenance_schedule_already_completed(self):
         self.maintenance_schedule.status = 'completed'

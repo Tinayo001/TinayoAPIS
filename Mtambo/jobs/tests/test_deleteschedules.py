@@ -10,6 +10,7 @@ from elevators.models import Elevator
 from buildings.models import Building
 from developers.models import DeveloperProfile
 import uuid
+from datetime import datetime
 
 class MaintenanceScheduleDeleteViewTest(TestCase):
     def setUp(self):
@@ -80,22 +81,27 @@ class MaintenanceScheduleDeleteViewTest(TestCase):
         self.assertEqual(response.data, {"detail": "Schedule not found."})
 
     def test_delete_maintenance_schedule(self):
+        # Create a maintenance schedule with a valid datetime object
+        scheduled_date = datetime(2023, 12, 31, 0, 0, 0)  # Correct datetime object
+    
         maintenance_schedule = MaintenanceSchedule.objects.create(
             elevator=self.elevator,
             technician=self.technician,
             maintenance_company=self.maintenance_company,
-            scheduled_date='2023-12-31T00:00:00Z',
+            scheduled_date=scheduled_date,  # Pass a datetime object here
             next_schedule='1_month',
             description='Test Maintenance Schedule',
             status='scheduled'
         )
+    
         request = self.factory.delete(f'/jobs/maintenance-schedule/delete/{maintenance_schedule.id}/')
         force_authenticate(request, user=self.user)
         response = self.view(request, schedule_id=maintenance_schedule.id)
+    
         self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
         self.assertEqual(response.data, {"detail": "Regular maintenance schedule deleted successfully."})
         self.assertFalse(MaintenanceSchedule.objects.filter(id=maintenance_schedule.id).exists())
-
+    
     def test_delete_ad_hoc_maintenance_schedule(self):
         ad_hoc_schedule = AdHocMaintenanceSchedule.objects.create(
             elevator=self.elevator,

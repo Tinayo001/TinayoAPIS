@@ -1,3 +1,4 @@
+from django.utils import timezone
 import factory
 from factory import Faker,  SubFactory
 from factory.django import DjangoModelFactory
@@ -92,18 +93,18 @@ class ElevatorFactory(DjangoModelFactory):
 
 
 # Factory for MaintenanceSchedule model
-class MaintenanceScheduleFactory(DjangoModelFactory):
+class MaintenanceScheduleFactory(factory.django.DjangoModelFactory):
     class Meta:
         model = MaintenanceSchedule
-    
+
     elevator = factory.SubFactory(ElevatorFactory)
     technician = factory.SubFactory(TechnicianProfileFactory)
     maintenance_company = factory.SubFactory(MaintenanceCompanyProfileFactory)
-    scheduled_date = factory.Faker('date_this_decade')
-    next_schedule = Faker('random_element', elements=['1_month', '3_months', '6_months', 'set_date'])
-    description = Faker('sentence')
-    status = Faker('random_element', elements=['scheduled', 'overdue', 'completed'])
-
+    
+    scheduled_date = factory.LazyFunction(timezone.now)  # This will ensure it's a datetime
+    next_schedule = factory.Iterator(['1_month', '3_months', '6_months', 'set_date'])
+    description = factory.Faker('paragraph')
+    status = factory.Iterator(['scheduled', 'overdue', 'completed'])
 
 # Factory for ElevatorConditionReport model
 class ElevatorConditionReportFactory(DjangoModelFactory):

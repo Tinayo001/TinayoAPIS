@@ -51,20 +51,7 @@ class CompleteBuildingScheduleViewTests(APITestCase):
     def test_successful_completion(self):
         """Test successful completion of building schedule with valid data"""
         data = {
-            "elevators": [
-                {
-                    "elevator_id": str(elevator.id),
-                    "condition_report": {
-                        "components_checked": "All major components",
-                        "condition": "Good working condition"
-                    },
-                    "maintenance_log": {
-                        "summary_title": "Regular maintenance",
-                        "description": "Completed all checks",
-                        "overseen_by": "John Supervisor"
-                    }
-                } for elevator in self.elevators
-            ]
+            "elevators": [str(elevator.id) for elevator in self.elevators]
         }
 
         response = self.client.post(self.url, data, format='json')
@@ -162,17 +149,36 @@ class CompleteBuildingScheduleViewTests(APITestCase):
     def test_missing_required_data(self):
         """Test with missing required data in the request"""
         data = {
-            "elevators": [
-                {
-                    "elevator_id": str(self.elevators[0].id),
-                    # Missing condition_report and maintenance_log
-                }
-            ]
+            "elevators": [str(self.elevators[0].id)]  # Just send the elevator UUID
         }
-        
+    
         response = self.client.post(self.url, data, format='json')
-        self.assertEqual(response.status_code, status.HTTP_200_OK)  # Still succeeds but creates empty reports
-
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+    
+        # Verify that default values were used
+        adhoc_schedule = AdHocMaintenanceSchedule.objects.get(
+            elevator=self.elevators[0],
+            status='completed'
+        )
+    
+        # Verify condition report was created with default values
+        condition_report = AdHocElevatorConditionReport.objects.get(
+            ad_hoc_schedule=adhoc_schedule
+        )
+        self.assertEqual(condition_report.components_checked, "Default components check - all components normal.")
+        self.assertEqual(condition_report.condition, "Good")
+    
+        # Verify maintenance log was created with default values
+        maintenance_log = AdHocMaintenanceLog.objects.get(
+            ad_hoc_schedule=adhoc_schedule
+        )
+        self.assertEqual(maintenance_log.summary_title, "Auto-generated maintenance log")
+        self.assertEqual(
+            maintenance_log.description, 
+            "Maintenance log auto-generated based on building-level schedule completion."
+        )
+        self.assertEqual(maintenance_log.overseen_by, "System")
+    
     def test_partial_success(self):
         """Test scenario where some elevators succeed and others fail"""
         other_building = BuildingFactory()

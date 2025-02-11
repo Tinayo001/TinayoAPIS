@@ -1,20 +1,29 @@
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
-from uuid import uuid4
-from jobs.models import MaintenanceSchedule, AdHocMaintenanceSchedule, BuildingLevelAdhocSchedule
+from django.utils import timezone
+from unittest.mock import patch
+from datetime import timedelta
+
+from jobs.models import (
+    MaintenanceSchedule,
+    AdHocMaintenanceSchedule,
+    BuildingLevelAdhocSchedule
+)
 from elevators.models import Elevator
 from buildings.models import Building
 from technicians.models import TechnicianProfile
 from maintenance_companies.models import MaintenanceCompanyProfile
 from account.models import User
 from developers.models import DeveloperProfile
-from unittest.mock import patch
+
 
 class MaintenanceScheduleListViewTest(APITestCase):
-    def setUp(self):
+    @classmethod
+    def setUpTestData(cls):
+        """Set up non-modified data for all test methods."""
         # Create users
-        self.user_technician = User.objects.create_user(
+        cls.user_technician = User.objects.create_user(
             email="technician@example.com",
             phone_number="1234567890",
             password="password123",
@@ -23,14 +32,7 @@ class MaintenanceScheduleListViewTest(APITestCase):
             account_type="technician"
         )
 
-        # Create technician profile
-        self.technician = TechnicianProfile.objects.create(
-            user=self.user_technician,
-            specialization="Elevator Technician"
-        )
-
-        # Create Developer Profile
-        self.developer_user = User.objects.create_user(
+        cls.developer_user = User.objects.create_user(
             email="developer@example.com",
             phone_number="0987654321",
             password="developerpassword",
@@ -39,27 +41,34 @@ class MaintenanceScheduleListViewTest(APITestCase):
             account_type="developer"
         )
 
-        self.developer_profile = DeveloperProfile.objects.create(
-            user=self.developer_user,
+        # Create profiles
+        cls.technician = TechnicianProfile.objects.create(
+            user=cls.user_technician,
+            specialization="Elevator Technician"
+        )
+
+        cls.developer_profile = DeveloperProfile.objects.create(
+            user=cls.developer_user,
             developer_name="Developer A",
             address="123 Developer St",
             specialization="Elevators"
         )
 
+        cls.maintenance_company = MaintenanceCompanyProfile.objects.create(
+            user=cls.user_technician,
+            company_name="Elevator Repairs Inc.",
+            company_address="456 Industry Blvd.",
+            registration_number="12345",
+            specialization="Elevator Maintenance"
+        )
+
+    def setUp(self):
+        """Set up data for each test method."""
         # Create building
         self.building = Building.objects.create(
             name="Building A",
             address="123 Main St",
             developer=self.developer_profile
-        )
-
-        # Create maintenance company
-        self.maintenance_company = MaintenanceCompanyProfile.objects.create(
-            user=self.user_technician,
-            company_name="Elevator Repairs Inc.",
-            company_address="456 Industry Blvd.",
-            registration_number="12345",
-            specialization="Elevator Maintenance"
         )
 
         # Create elevator
@@ -75,12 +84,20 @@ class MaintenanceScheduleListViewTest(APITestCase):
             technician=self.technician
         )
 
-        # Create maintenance schedules
+        # Create base schedule dates
+        self.base_date = timezone.now().replace(hour=10, minute=0, second=0, microsecond=0)
+        self.schedule_dates = {
+            'regular': self.base_date + timedelta(days=1),
+            'adhoc': self.base_date + timedelta(days=10),
+            'building': self.base_date + timedelta(days=15)
+        }
+
+        # Create schedules
         self.schedule_regular = MaintenanceSchedule.objects.create(
             elevator=self.elevator,
             technician=self.technician,
             maintenance_company=self.maintenance_company,
-            scheduled_date="2025-02-01T10:00:00Z",
+            scheduled_date=self.schedule_dates['regular'],
             next_schedule="1_month",
             description="Regular Maintenance"
         )
@@ -89,7 +106,7 @@ class MaintenanceScheduleListViewTest(APITestCase):
             elevator=self.elevator,
             technician=self.technician,
             maintenance_company=self.maintenance_company,
-            scheduled_date="2025-02-10T10:00:00Z",
+            scheduled_date=self.schedule_dates['adhoc'],
             description="Ad-Hoc Maintenance"
         )
 
@@ -97,9 +114,17 @@ class MaintenanceScheduleListViewTest(APITestCase):
             building=self.building,
             technician=self.technician,
             maintenance_company=self.maintenance_company,
-            scheduled_date="2025-02-15T10:00:00Z",
+            scheduled_date=self.schedule_dates['building'],
             description="Building-Level Ad-Hoc Maintenance"
         )
+
+    def tearDown(self):
+        """Clean up after each test."""
+        MaintenanceSchedule.objects.all().delete()
+        AdHocMaintenanceSchedule.objects.all().delete()
+        BuildingLevelAdhocSchedule.objects.all().delete()
+        Elevator.objects.all().delete()
+        Building.objects.all().delete()
 
     def test_get_all_schedules(self):
         """Test retrieving all maintenance schedules without filters."""
@@ -111,7 +136,6 @@ class MaintenanceScheduleListViewTest(APITestCase):
         self.assertIn('adhoc_schedules', response.data)
         self.assertIn('building_level_adhoc_schedules', response.data)
         
-        # Verify the number of schedules
         self.assertEqual(len(response.data['regular_schedules']), 1)
         self.assertEqual(len(response.data['adhoc_schedules']), 1)
         self.assertEqual(len(response.data['building_level_adhoc_schedules']), 1)
@@ -143,33 +167,27 @@ class MaintenanceScheduleListViewTest(APITestCase):
         self.assertEqual(len(response.data['adhoc_schedules']), 1)
         self.assertEqual(len(response.data['building_level_adhoc_schedules']), 1)
 
-    def test_filter_by_invalid_elevator_id(self):
-        """Test retrieving schedules with an invalid elevator ID."""
-        url = reverse('maintenance-schedule-list') + "?elevator_id=invalid-uuid"
-        response = self.client.get(url)
-        
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(response.data['detail'], "Invalid elevator_id format. Must be a valid UUID.")
+    def test_invalid_filters(self):
+        """Test all invalid filter scenarios."""
+        invalid_uuid = "invalid-uuid"
+        test_cases = [
+            ("elevator_id", invalid_uuid),
+            ("building_id", invalid_uuid),
+            ("technician_id", invalid_uuid)
+        ]
 
-    def test_filter_by_invalid_building_id(self):
-        """Test retrieving schedules with an invalid building ID."""
-        url = reverse('maintenance-schedule-list') + "?building_id=invalid-uuid"
-        response = self.client.get(url)
-        
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(response.data['detail'], "Invalid building_id format. Must be a valid UUID.")
-
-    def test_filter_by_invalid_technician_id(self):
-        """Test retrieving schedules with an invalid technician ID."""
-        url = reverse('maintenance-schedule-list') + "?technician_id=invalid-uuid"
-        response = self.client.get(url)
-        
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(response.data['detail'], "Invalid technician_id format. Must be a valid UUID.")
+        for param, value in test_cases:
+            url = reverse('maintenance-schedule-list') + f"?{param}={value}"
+            response = self.client.get(url)
+            
+            self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+            self.assertEqual(
+                response.data['detail'],
+                f"Invalid {param} format. Must be a valid UUID."
+            )
 
     def test_get_empty_schedule_list(self):
         """Test retrieving schedules when no schedules exist."""
-        # Delete all schedules
         MaintenanceSchedule.objects.all().delete()
         AdHocMaintenanceSchedule.objects.all().delete()
         BuildingLevelAdhocSchedule.objects.all().delete()
@@ -178,12 +196,12 @@ class MaintenanceScheduleListViewTest(APITestCase):
         response = self.client.get(url)
         
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.data['regular_schedules'], [])
-        self.assertEqual(response.data['adhoc_schedules'], [])
-        self.assertEqual(response.data['building_level_adhoc_schedules'], [])
+        self.assertEqual(len(response.data['regular_schedules']), 0)
+        self.assertEqual(len(response.data['adhoc_schedules']), 0)
+        self.assertEqual(len(response.data['building_level_adhoc_schedules']), 0)
 
     def test_server_error_handling(self):
-        """Test how the view handles unexpected server errors."""
+        """Test handling of unexpected server errors."""
         url = reverse('maintenance-schedule-list')
         
         with patch('jobs.models.MaintenanceSchedule.objects.all') as mock_queryset:
@@ -192,6 +210,3 @@ class MaintenanceScheduleListViewTest(APITestCase):
             
             self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
             self.assertEqual(response.data['detail'], "An error occurred: Unexpected error")
-
-     
-    

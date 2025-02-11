@@ -43,6 +43,10 @@ from developers.models import DeveloperProfile
 from developers.serializers import DeveloperDetailSerializer
 from buildings.serializers import BuildingSerializer
 from elevators.serializers import ElevatorSerializer, ElevatorReadSerializer, ElevatorCreateSerializer
+from alerts.services import AlertService
+from alerts.models import AlertType
+from typing import Dict, List, Tuple, Optional, Any
+from django.db import transaction
 
 from jobs.models import MaintenanceSchedule
 
@@ -336,7 +340,6 @@ class RemoveTechnicianFromCompanyView(APIView):
                 {"error": "An unexpected error occurred"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-
 class AddBuildingView(APIView):
     permission_classes = [IsAuthenticated]
     authentication_classes = [Custom401SessionAuthentication, Custom401JWTAuthentication]
@@ -493,7 +496,17 @@ class AddBuildingView(APIView):
                 developer=developer
             )
 
-            # Step 5: Create elevators
+            # Step 4.1: Send alert to developer about building registration
+            try:
+                AlertService.create_building_registration_alert(
+                    building=new_building,
+                    company=company,
+                    developer=developer
+                )
+            except Exception as e:
+                logger.error(f"Failed to create building registration alert: {str(e)}")
+
+            # Step 5: Create elevators and send alerts
             created_elevators = []
             for elevator_data in elevators_data:
                 # Validate technician if provided
@@ -529,6 +542,18 @@ class AddBuildingView(APIView):
                     developer=developer
                 )
 
+                # Send alert if technician is assigned
+                if technician:
+                    try:
+                        AlertService.create_alert(
+                            alert_type=AlertType.ELEVATOR_ASSIGNED,
+                            recipient=technician,
+                            related_object=new_elevator,
+                            message=f"New elevator {new_elevator.machine_number} has been assigned to you in building {new_building.name}"
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to create elevator assignment alert: {str(e)}")
+
                 created_elevators.append({
                     "id": str(new_elevator.id),
                     "user_name": new_elevator.user_name,
@@ -542,6 +567,17 @@ class AddBuildingView(APIView):
                                if technician else None)
                     }
                 })
+
+            # Send alert to developer about elevator registration
+            try:
+                AlertService.create_alert(
+                    alert_type=AlertType.ELEVATOR_REGISTERED,
+                    recipient=developer,
+                    related_object=new_building,
+                    message=f"{len(created_elevators)} elevator(s) have been registered to {company.company_name} in building {new_building.name}"
+                )
+            except Exception as e:
+                logger.error(f"Failed to create elevator registration alert: {str(e)}")
 
             # Return response data
             return Response({
@@ -951,46 +987,47 @@ class ElevatorDetailView(APIView):
 class ElevatorDetailByMachineNumberView(APIView):
     permission_classes = [AllowAny]
     
-    def get(self, request, company_id, machine_number):
+    def get(self, request, company_id, machine_number=None):
         """
         Retrieve elevator details by machine number and maintenance company.
         """
-        # Validate machine number
-        if not machine_number or not str(machine_number).strip():
+        # First check the machine number
+        if machine_number is None or not machine_number.strip():
             return Response(
                 {"error": "Machine number is required"},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
-        print(f"Received company_id: {company_id} (string), machine_number: {machine_number}")
-        
-        # Validate machine number is numeric
-        if not str(machine_number).strip().isdigit():
-            return Response(
-                {"error": "Machine number must be numeric"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
+
+        # Validate company exists
         try:
             company = MaintenanceCompanyProfile.objects.get(id=company_id)
-            elevator = Elevator.objects.get(
-                machine_number=machine_number.strip(),
-                maintenance_company=company
-            )
-            serialized_data = ElevatorSerializer(elevator)
-            return Response(serialized_data.data)
-            
         except MaintenanceCompanyProfile.DoesNotExist:
             return Response(
                 {"error": "Maintenance company profile not found."},
                 status=status.HTTP_404_NOT_FOUND
             )
+        
+        # Allow alphanumeric characters and hyphens
+        cleaned_number = machine_number.strip()
+        if not all(c.isalnum() or c == '-' for c in cleaned_number):
+            return Response(
+                {"error": "Machine number must be alphanumeric"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            elevator = Elevator.objects.get(
+                machine_number=machine_number,
+                maintenance_company=company
+            )
+            serialized_data = ElevatorSerializer(elevator)
+            return Response(serialized_data.data)
+            
         except Elevator.DoesNotExist:
             return Response(
                 {"error": "Elevator with the specified machine number not found under this maintenance company."},
                 status=status.HTTP_404_NOT_FOUND
             )
-
 
 class ElevatorDetailNoMachineView(APIView):
     permission_classes = [AllowAny]

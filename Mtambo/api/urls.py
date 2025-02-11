@@ -142,6 +142,7 @@ urlpatterns = [
     path('elevators/', include('elevators.urls')),
     path('jobs/', include('jobs.urls')),
     path('signup/', csrf_exempt(SignUpView.as_view()), name='signup-api'),
+    path('alerts/', include('alerts.urls')),
 
 
 ]

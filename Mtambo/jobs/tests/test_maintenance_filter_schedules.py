@@ -38,7 +38,8 @@ class MaintenanceScheduleFilterViewTests(TestCase):
             technician=self.technician,
             maintenance_company=self.maintenance_company,
             status='scheduled',
-            next_schedule='1_month'
+            next_schedule='1_month',
+            scheduled_date=datetime.now() + timedelta(days=5)  # Add 5 days for scheduled date
         )
         
         # Create ad-hoc maintenance schedule
@@ -46,7 +47,8 @@ class MaintenanceScheduleFilterViewTests(TestCase):
             elevator=self.elevator,
             technician=self.technician,
             maintenance_company=self.maintenance_company,
-            status='scheduled'
+            status='scheduled',
+            scheduled_date=datetime.now() + timedelta(days=5)
         )
         
         # Create building-level schedule
@@ -54,7 +56,8 @@ class MaintenanceScheduleFilterViewTests(TestCase):
             building=self.building,
             technician=self.technician,
             maintenance_company=self.maintenance_company,
-            status='scheduled'
+            status='scheduled',
+            scheduled_date=datetime.now() + timedelta(days=5)
         )
 
     def test_filter_by_schedule_type(self):
@@ -121,55 +124,16 @@ class MaintenanceScheduleFilterViewTests(TestCase):
 
     def test_filter_by_building(self):
         """Test filtering by building"""
-        from django.test import Client
-        import logging
-        logger = logging.getLogger('django.test')
-
-        # Create test data specific for this test
-        building_schedule = BuildingLevelAdhocScheduleFactory(
-            building=self.building,
-            technician=self.technician,
-            maintenance_company=self.maintenance_company,
-            status='scheduled'
-        )
-
-        # Debug logging
-        logger.debug("\n=== DEBUG INFO ===")
-        logger.debug(f"Building ID: {self.building.id}")
-    
-        # Verify database state
-        all_schedules = BuildingLevelAdhocSchedule.objects.all()
-        logger.debug(f"Total building schedules in DB: {all_schedules.count()}")
-        for schedule in all_schedules:
-            logger.debug(f"Schedule ID: {schedule.id}, Building ID: {schedule.building.id}")
-
-        # Make request with explicit debugging
-        request_data = {
-            'building_id': str(self.building.id),
-            'schedule_type': 'building'
-        }
-        logger.debug(f"Request data: {request_data}")
-
-        # Use test client with debugging enabled
-        client = Client(raise_request_exception=False)
-        response = client.put(
+        response = self.client.put(
             self.url,
-            request_data,
-            content_type='application/json'
+            {
+                'building_id': str(self.building.id),
+                'schedule_type': 'building'
+            },
+            format='json'
         )
-
-        logger.debug(f"Response status: {response.status_code}")
-        logger.debug(f"Response data: {response.data if hasattr(response, 'data') else response.content}")
-
-        # Force output to console
-        import sys
-        sys.stderr.write("\nTest debug output:\n")
-        sys.stderr.write(f"Building ID: {self.building.id}\n")
-        sys.stderr.write(f"Schedule count: {all_schedules.count()}\n")
-        sys.stderr.write(f"Response status: {response.status_code}\n")
-        sys.stderr.write(f"Response content: {response.content}\n")
-
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+
     def test_filter_by_elevator(self):
         """Test filtering by elevator"""
         response = self.client.put(
@@ -266,3 +230,4 @@ class MaintenanceScheduleFilterViewTests(TestCase):
         """Test that the URL resolves correctly"""
         url = reverse('maintenance-schedule-filter')
         self.assertEqual(url, '/api/jobs/maintenance-schedules/filter/')
+

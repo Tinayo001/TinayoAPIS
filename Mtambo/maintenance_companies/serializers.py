@@ -42,9 +42,21 @@ class AddBuildingSerializer(serializers.Serializer):
     name = serializers.CharField(max_length=255, help_text="Name of the building")
     address = serializers.CharField(max_length=255, help_text="Address of the building")
     contact = serializers.CharField(max_length=255, help_text="Contact information")
-    elevator = ElevatorSerializer()
+    elevators = serializers.ListField(  # Changed from elevator to elevators
+        child=ElevatorSerializer(),
+        help_text="List of elevators to be added to the building",
+        required=True
+    )
 
-    def validate_elevator(self, value):
-        if not isinstance(value.get('capacity'), int):
-            raise serializers.ValidationError({"capacity": "A valid integer is required."})
+    def validate_elevators(self, value):
+        """
+        Validate the elevators list.
+        """
+        if not value:
+            raise serializers.ValidationError("At least one elevator is required.")
+        
+        for elevator in value:
+            if not isinstance(elevator.get('capacity'), int):
+                raise serializers.ValidationError({"capacity": "A valid integer is required."})
+        
         return value

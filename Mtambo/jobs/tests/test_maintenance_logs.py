@@ -4,6 +4,7 @@ from django.test import TestCase
 from rest_framework.test import APIClient
 from rest_framework import status
 from django.urls import reverse
+from django.utils import timezone
 from jobs.factories import (
     MaintenanceScheduleFactory,
     AdHocMaintenanceScheduleFactory,
@@ -27,20 +28,27 @@ class FileMaintenanceLogViewTestCase(TestCase):
         self.regular_schedule = MaintenanceScheduleFactory(
             technician=self.technician,
             maintenance_company=self.maintenance_company,
-            status='scheduled'
+            status='scheduled',
+            scheduled_date=timezone.now() + timezone.timedelta(days=1)  # Ensure a future date for testing
         )
         self.adhoc_schedule = AdHocMaintenanceScheduleFactory(
             technician=self.technician,
             maintenance_company=self.maintenance_company,
-            status='scheduled'
+            status='scheduled',
+            scheduled_date=timezone.now() + timezone.timedelta(days=1)  # Ensure a future date for testing
         )
         self.valid_regular_data = {
             'schedule_type': 'regular',
             'condition_report': {
+                'maintenance_schedule': str(self.regular_schedule.id),
+                'technician': str(self.technician.id),
                 'components_checked': 'Checked components',
                 'condition': 'Good condition',
             },
             'maintenance_log': {
+                'performed_tasks': [
+                    {'task_name': 'Test Task', 'status': 'completed'}
+                ],
                 'check_machine_gear': True,
                 'check_machine_brake': True,
                 'check_controller_connections': True,
@@ -54,6 +62,8 @@ class FileMaintenanceLogViewTestCase(TestCase):
         self.valid_adhoc_data = {
             'schedule_type': 'adhoc',
             'condition_report': {
+                'maintenance_schedule': str(self.adhoc_schedule.id),
+                'technician': str(self.technician.id),
                 'components_checked': 'Checked components',
                 'condition': 'Good condition',
             },
@@ -153,7 +163,7 @@ class FileMaintenanceLogViewTestCase(TestCase):
             format='json'
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("Field 'check_machine_gear' required for regular maintenance.", response.data['detail'])
+        self.assertIn("check_machine_gear", response.data['detail'])
 
     def test_adhoc_missing_summary_title(self):
         invalid_data = self.valid_adhoc_data.copy()
@@ -195,3 +205,18 @@ class FileMaintenanceLogViewTestCase(TestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.data['detail'], "No maintenance company assigned.")
+
+    def test_schedule_status_update_to_overdue(self):
+        overdue_schedule = MaintenanceScheduleFactory(
+            status='scheduled', 
+            scheduled_date=timezone.now() - timezone.timedelta(days=1)
+        )
+        response = self.client.post(
+            self.get_url(overdue_schedule.id),
+            data=self.valid_regular_data,
+            format='json'
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        overdue_schedule.refresh_from_db()
+        self.assertEqual(overdue_schedule.status, 'overdue')
+

@@ -12,6 +12,9 @@ from technicians.models import TechnicianProfile
 
 from developers.models import DeveloperProfile  # Ensure this import is present
 
+from django.utils import timezone
+from datetime import datetime
+
 class ElevatorMaintenanceSchedulesViewTest(TestCase):
     def setUp(self):
         self.client = APIClient()
@@ -73,12 +76,17 @@ class ElevatorMaintenanceSchedulesViewTest(TestCase):
             maintenance_company=self.maintenance_company
         )
 
+        # Create timezone-aware datetime for maintenance schedules
+        scheduled_date_1 = timezone.make_aware(datetime.strptime('2023-12-01T10:00:00', '%Y-%m-%dT%H:%M:%S'))
+        scheduled_date_2 = timezone.make_aware(datetime.strptime('2023-12-05T10:00:00', '%Y-%m-%dT%H:%M:%S'))
+        scheduled_date_3 = timezone.make_aware(datetime.strptime('2023-12-10T10:00:00', '%Y-%m-%dT%H:%M:%S'))
+
         # Create a regular maintenance schedule
         self.regular_schedule = MaintenanceSchedule.objects.create(
             elevator=self.elevator,
             technician=self.technician,
             maintenance_company=self.maintenance_company,
-            scheduled_date='2023-12-01T10:00:00Z',
+            scheduled_date=scheduled_date_1,
             next_schedule='1_month',
             description='Regular maintenance',
             status='scheduled'
@@ -89,7 +97,7 @@ class ElevatorMaintenanceSchedulesViewTest(TestCase):
             elevator=self.elevator,
             technician=self.technician,
             maintenance_company=self.maintenance_company,
-            scheduled_date='2023-12-05T10:00:00Z',
+            scheduled_date=scheduled_date_2,
             description='Ad-hoc maintenance',
             status='scheduled'
         )
@@ -99,7 +107,7 @@ class ElevatorMaintenanceSchedulesViewTest(TestCase):
             building=self.building,
             technician=self.technician,
             maintenance_company=self.maintenance_company,
-            scheduled_date='2023-12-10T10:00:00Z',
+            scheduled_date=scheduled_date_3,
             description='Building-level ad-hoc maintenance',
             status='scheduled'
         )
@@ -145,6 +153,7 @@ class ElevatorMaintenanceSchedulesViewTest(TestCase):
             installation_date='2023-02-01',
             maintenance_company=self.maintenance_company
         )
+
     def test_get_maintenance_schedules_for_nonexistent_elevator(self):
         """
         Test retrieving maintenance schedules for an elevator that does not exist.
@@ -154,3 +163,4 @@ class ElevatorMaintenanceSchedulesViewTest(TestCase):
         response = self.client.get(url)
 
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+

@@ -72,6 +72,7 @@ INSTALLED_APPS = [
     'elevators',
     'buildings',
     'jobs',
+    'alerts',
     'django_celery_beat',
     'django_celery_results',
     'django_filters',
@@ -218,20 +219,21 @@ SWAGGER_SETTINGS = {
     },
     'USE_SESSION_AUTH': False,  # Disable session auth for Swagger
 }
+
 CELERY_BROKER_URL = 'redis://localhost:6379/0'
 CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
-CELERY_TIMEZONE = 'UTC'  # Make sure this matches your Django TIME_ZONE
-
-# Celery Beat Schedule
+CELERY_TIMEZONE = 'UTC'
+CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'
 CELERY_BEAT_SCHEDULE = {
     'check-overdue-schedules': {
         'task': 'jobs.tasks.check_overdue_schedules',
-        'schedule': 300.0,  # 5 minutes in seconds (more reliable than crontab for testing)
+        'schedule': 60.0,  # Run every minute for more timely updates
         'options': {
-            'expires': 299.0,  # Ensure task expires before next run
+            'expires': 59.0,
         },
     },
 }
+

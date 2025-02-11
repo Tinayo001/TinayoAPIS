@@ -36,150 +36,198 @@ from .exceptions import InvalidFilterError
 from drf_yasg import openapi
 from drf_yasg.utils import swagger_auto_schema
 
+from alerts.services import AlertService
+from alerts.models import AlertType
+
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 class CreateRoutineMaintenanceScheduleView(APIView):
-    permission_classes = [AllowAny]
+   permission_classes = [AllowAny]
 
-    @swagger_auto_schema(
-        operation_description="Create a maintenance schedule for a specific elevator",
-        manual_parameters=[
-            openapi.Parameter(
-                'elevator_id',
-                openapi.IN_PATH,
-                description="UUID of the elevator",
-                type=openapi.TYPE_STRING,
-                format=openapi.FORMAT_UUID,
-                required=True
-            ),
-        ],
-        request_body=openapi.Schema(
-            type=openapi.TYPE_OBJECT,
-            required=['next_schedule', 'scheduled_date', 'description'],
-            properties={
-                'next_schedule': openapi.Schema(
-                    type=openapi.TYPE_STRING,
-                    enum=['1_month', '3_months', '6_months', 'set_date'],
-                    description="Frequency of the next maintenance schedule"
-                ),
-                'scheduled_date': openapi.Schema(
-                    type=openapi.TYPE_STRING,
-                    description="Scheduled date in YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ format"
-                ),
-                'description': openapi.Schema(
-                    type=openapi.TYPE_STRING,
-                    description="Description of the maintenance schedule"
-                )
-            }
-        ),
-        responses={
-            201: "Maintenance schedule created successfully",
-            400: "Bad Request - Invalid input data",
-            404: "Not Found - Elevator does not exist",
-            409: "Conflict - Active maintenance schedule already exists"
-        }
-    )
-    def post(self, request, elevator_id):
-        # Validate elevator UUID
-        try:
-            elevator_uuid = UUID(str(elevator_id))
-        except ValueError:
-            return Response(status=status.HTTP_404_NOT_FOUND)
+   @swagger_auto_schema(
+       operation_description="Create a maintenance schedule for a specific elevator",
+       manual_parameters=[
+           openapi.Parameter(
+               'elevator_id',
+               openapi.IN_PATH,
+               description="UUID of the elevator",
+               type=openapi.TYPE_STRING,
+               format=openapi.FORMAT_UUID,
+               required=True
+           ),
+       ],
+       request_body=openapi.Schema(
+           type=openapi.TYPE_OBJECT,
+           required=['next_schedule', 'scheduled_date', 'description'],
+           properties={
+               'next_schedule': openapi.Schema(
+                   type=openapi.TYPE_STRING,
+                   enum=['1_month', '3_months', '6_months', 'set_date'],
+                   description="Frequency of the next maintenance schedule"
+               ),
+               'scheduled_date': openapi.Schema(
+                   type=openapi.TYPE_STRING,
+                   description="Scheduled date in YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ format"
+               ),
+               'description': openapi.Schema(
+                   type=openapi.TYPE_STRING,
+                   description="Description of the maintenance schedule"
+               )
+           }
+       ),
+       responses={
+           201: "Maintenance schedule created successfully",
+           400: "Bad Request - Invalid input data",
+           404: "Not Found - Elevator does not exist",
+           409: "Conflict - Active maintenance schedule already exists"
+       }
+   )
+   def post(self, request, elevator_id):
+       try:
+           logger.info(f"Creating maintenance schedule for elevator {elevator_id}")
+           
+           try:
+               elevator_uuid = UUID(str(elevator_id))
+           except ValueError:
+               logger.error(f"Invalid elevator UUID format: {elevator_id}")
+               return Response(
+                   {"detail": "Invalid elevator ID format"},
+                   status=status.HTTP_404_NOT_FOUND
+               )
 
-        # Check if elevator exists
-        try:
-            elevator = Elevator.objects.get(id=elevator_uuid)
-        except Elevator.DoesNotExist:
-            return Response(status=status.HTTP_404_NOT_FOUND)
+           try:
+               elevator = Elevator.objects.get(id=elevator_uuid)
+           except Elevator.DoesNotExist:
+               logger.error(f"Elevator not found: {elevator_id}")
+               return Response(
+                   {"detail": "Elevator not found"},
+                   status=status.HTTP_404_NOT_FOUND
+               )
 
-        # Validate required fields
-        required_fields = ['next_schedule', 'scheduled_date', 'description']
-        if not all(field in request.data for field in required_fields):
-            return Response(
-                {"detail": "Missing required fields"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+           required_fields = ['next_schedule', 'scheduled_date', 'description']
+           if not all(field in request.data for field in required_fields):
+               missing_fields = [field for field in required_fields if field not in request.data]
+               logger.error(f"Missing required fields: {missing_fields}")
+               return Response(
+                   {"detail": f"Missing required fields: {', '.join(missing_fields)}"},
+                   status=status.HTTP_400_BAD_REQUEST
+               )
 
-        # Check if there's an existing active maintenance schedule
-        if request.data['next_schedule'] != 'set_date':
-            existing_schedule = MaintenanceSchedule.objects.filter(
-                elevator=elevator,
-                next_schedule=request.data['next_schedule'],
-                status__in=['scheduled', 'overdue']  # Check for active schedules
-            ).exists()
+           if request.data['next_schedule'] != 'set_date':
+               existing_schedule = MaintenanceSchedule.objects.filter(
+                   elevator=elevator,
+                   next_schedule=request.data['next_schedule'],
+                   status__in=['scheduled', 'overdue']
+               ).exists()
 
-            if existing_schedule:
-                return Response(
-                    {
-                        "detail": f"An active {request.data['next_schedule']} maintenance schedule already exists for this elevator. "
-                                 "Please complete the existing schedule before creating a new one."
-                    },
-                    status=status.HTTP_409_CONFLICT
-                )
+               if existing_schedule:
+                   logger.warning(f"Existing active schedule found for elevator {elevator_id}")
+                   return Response(
+                       {"detail": "An active maintenance schedule already exists for this elevator"},
+                       status=status.HTTP_409_CONFLICT
+                   )
 
-        # Validate date format and check if date is in the past
-        try:
-            date_str = request.data['scheduled_date']
-            
-            # Parse the date string based on format
-            try:
-                if 'T' in date_str:
-                    scheduled_date = datetime.strptime(date_str, '%Y-%m-%dT%H:%M:%SZ')
-                else:
-                    scheduled_date = datetime.strptime(date_str, '%Y-%m-%d')
-            except ValueError:
-                return Response(
-                    {"detail": "Invalid date format. Please provide a valid date in the format 'YYYY-MM-DD' or 'YYYY-MM-DDTHH:MM:SSZ'."},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+           try:
+               date_str = request.data['scheduled_date']
+               
+               try:
+                   if 'T' in date_str:
+                       scheduled_date = datetime.strptime(date_str, '%Y-%m-%dT%H:%M:%SZ')
+                   else:
+                       scheduled_date = datetime.strptime(date_str, '%Y-%m-%d')
+                       scheduled_date = scheduled_date.replace(hour=23, minute=59, second=59)
+               
+                   scheduled_date = timezone.make_aware(scheduled_date)
+                   
+               except ValueError:
+                   logger.error(f"Invalid date format provided: {date_str}")
+                   return Response(
+                       {"detail": "Invalid date format. Please provide a valid date in the format 'YYYY-MM-DD' or 'YYYY-MM-DDTHH:MM:SSZ'."},
+                       status=status.HTTP_400_BAD_REQUEST
+                   )
 
-            # Check if the date is in the past
-            current_date = datetime.now()
-            if scheduled_date.date() < current_date.date():
-                return Response(
-                    {"detail": "Scheduled date cannot be in the past."},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+               current_date = timezone.now()
+               if scheduled_date < current_date:
+                   logger.warning(f"Attempted to schedule maintenance in the past: {scheduled_date}")
+                   return Response(
+                       {"detail": "Scheduled date cannot be in the past."},
+                       status=status.HTTP_400_BAD_REQUEST
+                   )
 
-        except ValueError:
-            return Response(
-                {"detail": "Invalid date format. Please provide a valid date in the format 'YYYY-MM-DD' or 'YYYY-MM-DDTHH:MM:SSZ'."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+           except ValueError as e:
+               logger.error(f"Date validation error: {str(e)}")
+               return Response(
+                   {"detail": "Invalid date format. Please provide a valid date in the format 'YYYY-MM-DD' or 'YYYY-MM-DDTHH:MM:SSZ'."},
+                   status=status.HTTP_400_BAD_REQUEST
+               )
 
-        # Prepare data for serializer
-        schedule_data = {
-            **request.data,
-            'elevator': str(elevator.id),
-            'technician': str(elevator.technician.id) if elevator.technician else None,
-            'maintenance_company': str(elevator.maintenance_company.id) if elevator.maintenance_company else None,
-            'scheduled_date': scheduled_date,
-            'status': 'scheduled'  # Set initial status
-        }
+           schedule_data = {
+               **request.data,
+               'elevator': str(elevator.id),
+               'technician': str(elevator.technician.id) if elevator.technician else None,
+               'maintenance_company': str(elevator.maintenance_company.id) if elevator.maintenance_company else None,
+               'scheduled_date': scheduled_date,
+               'status': 'scheduled'
+           }
 
-        # Create schedule using serializer
-        serializer = MaintenanceScheduleSerializer(data=schedule_data)
-        
-        if serializer.is_valid():
-            schedule = serializer.save()
-            return Response(
-                {
-                    "message": "Maintenance schedule created successfully",
-                    "maintenance_schedule_id": str(schedule.id),
-                    "elevator_id": str(elevator.id),
-                    "technician_id": str(elevator.technician.id) if elevator.technician else None,
-                    "maintenance_company_id": str(elevator.maintenance_company.id) if elevator.maintenance_company else None
-                },
-                status=status.HTTP_201_CREATED
-            )
-            
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+           serializer = MaintenanceScheduleSerializer(data=schedule_data)
+           
+           if serializer.is_valid():
+               schedule = serializer.save()
+               
+               logger.info(
+                   f"Maintenance schedule created - ID: {schedule.id}, "
+                   f"Status: scheduled, "
+                   f"Scheduled Date: {scheduled_date}, "
+                   f"Current Date: {current_date}"
+               )
+
+               if elevator.technician:
+                   schedule_type = request.data['next_schedule'].replace('_', ' ').title()
+                   
+                   AlertService.create_alert(
+                       alert_type=AlertType.SCHEDULE_ASSIGNED,
+                       recipient=elevator.technician,
+                       related_object=schedule,
+                       message=(
+                           f"New {schedule_type} maintenance schedule assigned for elevator {elevator.machine_number}. "
+                           f"Scheduled for: {scheduled_date.strftime('%Y-%m-%d %H:%M')}"
+                       )
+                   )
+
+               return Response(
+                   {
+                       "message": "Maintenance schedule created successfully",
+                       "maintenance_schedule_id": str(schedule.id),
+                       "elevator_id": str(elevator.id),
+                       "technician_id": str(elevator.technician.id) if elevator.technician else None,
+                       "maintenance_company_id": str(elevator.maintenance_company.id) if elevator.maintenance_company else None,
+                       "status": 'scheduled',
+                       "scheduled_date": scheduled_date.isoformat(),
+                       "created_at": timezone.now().isoformat()
+                   },
+                   status=status.HTTP_201_CREATED
+               )
+           
+           logger.error(f"Serializer validation failed: {serializer.errors}")
+           return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+       except Exception as e:
+           logger.error(f"Error creating maintenance schedule: {str(e)}", exc_info=True)
+           return Response(
+               {"detail": f"An error occurred while creating the maintenance schedule: {str(e)}"},
+               status=status.HTTP_400_BAD_REQUEST
+           )
 
 class CreateAdHocMaintenanceScheduleView(APIView):
     permission_classes = [IsAuthenticated]
 
     @swagger_auto_schema(
         operation_description="Create an ad-hoc maintenance schedule for a given elevator UUID. "
-                              "Technician and maintenance company are auto-assigned based on the elevator.",
+                            "Technician and maintenance company are auto-assigned based on the elevator.",
         request_body=openapi.Schema(
             type=openapi.TYPE_OBJECT,
             properties={
@@ -203,6 +251,7 @@ class CreateAdHocMaintenanceScheduleView(APIView):
                     properties={
                         'message': openapi.Schema(type=openapi.TYPE_STRING, description="Success message."),
                         'maintenance_schedule_id': openapi.Schema(type=openapi.TYPE_INTEGER, description="ID of the created maintenance schedule."),
+                        'schedule': openapi.Schema(type=openapi.TYPE_OBJECT, description="The created schedule details.")
                     }
                 )
             ),
@@ -218,126 +267,282 @@ class CreateAdHocMaintenanceScheduleView(APIView):
         }
     )
     def post(self, request, elevator_uuid):
-        # Get the elevator instance by UUID
-        elevator = get_object_or_404(Elevator, id=elevator_uuid)
-
-        # Extract and validate the request data
-        description = request.data.get("description")
-        scheduled_date = request.data.get("scheduled_date")
-
-        # Handle missing description
-        if not description:
-            return Response(
-                {"detail": "Missing required field: description."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        # Handle missing scheduled_date
-        if not scheduled_date:
-            return Response(
-                {"detail": "Missing required field: scheduled_date."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Try parsing the scheduled_date with dateutil.parser.parse
         try:
-            # Try parsing the scheduled date string
-            scheduled_datetime = parser.isoparse(scheduled_date)
-        except ValueError:
-            # If parsing fails, assume it's just a date without time
-            try:
-                scheduled_datetime = datetime.strptime(scheduled_date, "%Y-%m-%d").date()
-                # Automatically set the time to midnight (00:00:00)
-                scheduled_datetime = datetime.combine(scheduled_datetime, datetime.min.time())
-            except ValueError:
-                # Log the error for debugging
-                print(f"Error parsing date: {scheduled_date}")
+            # Get the elevator instance by UUID
+            elevator = get_object_or_404(Elevator, id=elevator_uuid)
+
+            # Extract and validate the request data
+            description = request.data.get("description")
+            scheduled_date = request.data.get("scheduled_date")
+
+            # Handle missing description
+            if not description:
                 return Response(
-                    {"detail": "Invalid date format. Please provide a valid date in the format 'YYYY-MM-DD' or 'YYYY-MM-DDTHH:MM:SS'."},
+                    {"detail": "Missing required field: description."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Handle missing scheduled_date
+            if not scheduled_date:
+                return Response(
+                    {"detail": "Missing required field: scheduled_date."},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
-        # Check if scheduled_datetime is naive (no timezone info) before making it aware
-        if timezone.is_naive(scheduled_datetime):
-            scheduled_datetime = timezone.make_aware(scheduled_datetime, timezone.get_current_timezone())
+            # Try parsing the scheduled_date with dateutil.parser.parse
+            try:
+                # Try parsing the scheduled date string
+                scheduled_datetime = parser.isoparse(scheduled_date)
+            except ValueError:
+                # If parsing fails, assume it's just a date without time
+                try:
+                    scheduled_datetime = datetime.strptime(scheduled_date, "%Y-%m-%d").date()
+                    # Automatically set the time to midnight (00:00:00)
+                    scheduled_datetime = datetime.combine(scheduled_datetime, datetime.min.time())
+                except ValueError:
+                    # Log the error for debugging
+                    print(f"Error parsing date: {scheduled_date}")
+                    return Response(
+                        {"detail": "Invalid date format. Please provide a valid date in the format 'YYYY-MM-DD' or 'YYYY-MM-DDTHH:MM:SS'."},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
 
-        # Ensure the scheduled date is in the future
-        if scheduled_datetime < timezone.now():
-            return Response(
-                {"detail": "The scheduled date cannot be in the past. Please choose a future date."},
-                status=status.HTTP_400_BAD_REQUEST
+            # Check if scheduled_datetime is naive (no timezone info) before making it aware
+            if timezone.is_naive(scheduled_datetime):
+                scheduled_datetime = timezone.make_aware(scheduled_datetime, timezone.get_current_timezone())
+
+            # Ensure the scheduled date is in the future
+            if scheduled_datetime < timezone.now():
+                return Response(
+                    {"detail": "The scheduled date cannot be in the past. Please choose a future date."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Create the Ad-Hoc Maintenance Schedule
+            maintenance_schedule = AdHocMaintenanceSchedule.objects.create(
+                elevator=elevator,
+                description=description,
+                scheduled_date=scheduled_datetime,
+                technician=elevator.technician,  # Assign technician from the elevator
+                maintenance_company=elevator.maintenance_company  # Assign maintenance company from the elevator
             )
 
-        # Create the Ad-Hoc Maintenance Schedule
-        maintenance_schedule = AdHocMaintenanceSchedule.objects.create(
-            elevator=elevator,
-            description=description,
-            scheduled_date=scheduled_datetime,
-            technician=elevator.technician,  # Assign technician from the elevator
-            maintenance_company=elevator.maintenance_company  # Assign maintenance company from the elevator
-        )
+            # Create alert for the technician
+            if elevator.technician:
+                AlertService.create_alert(
+                    alert_type=AlertType.ADHOC_MAINTENANCE_SCHEDULED,
+                    recipient=elevator.technician,
+                    related_object=maintenance_schedule,
+                    message=f"New ad-hoc maintenance scheduled for elevator {elevator.machine_number} on {scheduled_datetime.strftime('%Y-%m-%d %H:%M')}"
+                )
 
-        # Serialize the maintenance schedule and return a response
-        serializer = AdHocMaintenanceScheduleSerializer(maintenance_schedule)
-        return Response(
-            {
-                "message": "Ad-Hoc maintenance schedule created successfully",
-                "maintenance_schedule_id": maintenance_schedule.id,
-                "schedule": serializer.data
-            },
-            status=status.HTTP_201_CREATED
-        )
-
+            # Serialize the maintenance schedule and return a response
+            serializer = AdHocMaintenanceScheduleSerializer(maintenance_schedule)
+            return Response(
+                {
+                    "message": "Ad-Hoc maintenance schedule created successfully",
+                    "maintenance_schedule_id": maintenance_schedule.id,
+                    "schedule": serializer.data
+                },
+                status=status.HTTP_201_CREATED
+            )
+            
+        except Exception as e:
+            return Response(
+                {"detail": f"An error occurred while creating the maintenance schedule: {str(e)}"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
 class ChangeMaintenanceScheduleToCompletedView(APIView):
     permission_classes = [IsAuthenticated]
     
     def put(self, request, schedule_id):
+        """
+        Mark a maintenance schedule as completed and generate the next schedule if applicable.
+        """
         maintenance_schedule = get_object_or_404(MaintenanceSchedule, id=schedule_id)
+        
         # Check if the technician is assigned
         if maintenance_schedule.technician is None:
             return Response(
                 {"detail": "This maintenance schedule cannot be completed as no technician has been assigned."},
                 status=status.HTTP_400_BAD_REQUEST
             )
+
+        # Check if schedule is overdue and send alerts if needed
+        self._check_and_handle_overdue_status(maintenance_schedule)
+
         # Status transition handlers
         status_transitions = {
             'completed': self._handle_already_completed,
             'overdue': self._handle_overdue_status,
             'scheduled': self._handle_scheduled_status,
         }
+        
         handler = status_transitions.get(maintenance_schedule.status)
         if handler:
             return handler(maintenance_schedule)
+        
         return Response(
             {"detail": "Unexpected status."},
             status=status.HTTP_400_BAD_REQUEST
         )
 
+    def _generate_next_schedule(self, maintenance_schedule):
+        """
+        Generate the next maintenance schedule based on the frequency.
+        Returns None for one-time schedules or if generation fails.
+        """
+        if maintenance_schedule.next_schedule == 'set_date':
+            return None  # Don't generate next schedule for one-time schedules
+
+        schedule_intervals = {
+            '1_month': relativedelta(months=1),
+            '3_months': relativedelta(months=3),
+            '6_months': relativedelta(months=6),
+        }
+
+        interval = schedule_intervals.get(maintenance_schedule.next_schedule)
+        if not interval:
+            return None
+
+        next_date = maintenance_schedule.scheduled_date + interval
+        
+        # Check if a schedule already exists for this elevator on the calculated date
+        existing_schedule = MaintenanceSchedule.objects.filter(
+            elevator=maintenance_schedule.elevator,
+            scheduled_date=next_date
+        ).first()
+        
+        if existing_schedule:
+            return existing_schedule
+
+        try:
+            new_schedule = MaintenanceSchedule.objects.create(
+                elevator=maintenance_schedule.elevator,
+                technician=maintenance_schedule.technician,
+                maintenance_company=maintenance_schedule.maintenance_company,
+                scheduled_date=next_date,
+                next_schedule=maintenance_schedule.next_schedule,
+                description=f"Routine {maintenance_schedule.next_schedule.replace('_', ' ')} maintenance",
+                status='scheduled'
+            )
+
+            if new_schedule.technician:
+                AlertService.create_alert(
+                    alert_type=AlertType.SCHEDULE_ASSIGNED,
+                    recipient=new_schedule.technician,
+                    related_object=new_schedule,
+                    message=(
+                        f"New routine maintenance schedule created for elevator {new_schedule.elevator.machine_number}. "
+                        f"Scheduled for: {next_date.strftime('%Y-%m-%d %H:%M')}"
+                    )
+                )
+
+            return new_schedule
+
+        except IntegrityError:
+            # Handle race condition - return the schedule that was created by another process
+            return MaintenanceSchedule.objects.get(
+                elevator=maintenance_schedule.elevator,
+                scheduled_date=next_date
+            )
+
+    def _check_and_handle_overdue_status(self, maintenance_schedule):
+        """
+        Check if a schedule is overdue and send alerts if it just became overdue.
+        """
+        if (maintenance_schedule.scheduled_date < timezone.now() and 
+            maintenance_schedule.status == 'scheduled'):
+            
+            maintenance_schedule.status = 'overdue'
+            maintenance_schedule.save()
+
+            # Generate next schedule if this is a routine maintenance
+            next_schedule = self._generate_next_schedule(maintenance_schedule)
+
+            # Common message for all recipients
+            elevator = maintenance_schedule.elevator
+            base_message = (
+                f"Maintenance schedule for elevator {elevator.machine_number} "
+                f"in building {elevator.building.name} is now overdue. "
+                f"Original scheduled date: {maintenance_schedule.scheduled_date.strftime('%Y-%m-%d %H:%M')}"
+            )
+
+            if next_schedule:
+                base_message += f"\nNext maintenance scheduled for: {next_schedule.scheduled_date.strftime('%Y-%m-%d %H:%M')}"
+
+            # Send alerts to all relevant parties
+            if maintenance_schedule.technician:
+                AlertService.create_alert(
+                    alert_type=AlertType.TASK_OVERDUE,
+                    recipient=maintenance_schedule.technician,
+                    related_object=maintenance_schedule,
+                    message=f"{base_message}\nPlease complete the maintenance as soon as possible."
+                )
+
+            if maintenance_schedule.maintenance_company:
+                AlertService.create_alert(
+                    alert_type=AlertType.TASK_OVERDUE,
+                    recipient=maintenance_schedule.maintenance_company,
+                    related_object=maintenance_schedule,
+                    message=f"{base_message}\nPlease ensure this maintenance is completed promptly."
+                )
+
+            if elevator.building.developer:
+                AlertService.create_alert(
+                    alert_type=AlertType.TASK_OVERDUE,
+                    recipient=elevator.building.developer,
+                    related_object=maintenance_schedule,
+                    message=f"{base_message}\nThe maintenance company has been notified."
+                )
+
     def _handle_already_completed(self, maintenance_schedule):
+        """Handle attempt to complete an already completed schedule."""
         return Response(
             {"detail": "Sorry, this maintenance schedule has already been completed!"},
             status=status.HTTP_400_BAD_REQUEST
         )
 
     def _handle_overdue_status(self, maintenance_schedule):
+        """Handle completion of an overdue schedule."""
         maintenance_schedule.status = 'completed'
         maintenance_schedule.save()
+        
+        next_schedule = self._generate_next_schedule(maintenance_schedule)
+        
         serializer = MaintenanceScheduleSerializer(maintenance_schedule)
-        return Response({
+        response_data = {
             "detail": "The maintenance schedule was overdue and has now been marked as completed.",
             "schedule": serializer.data
-        }, status=status.HTTP_200_OK)
+        }
+        
+        if next_schedule:
+            next_serializer = MaintenanceScheduleSerializer(next_schedule)
+            response_data["next_schedule"] = next_serializer.data
+            response_data["detail"] += f" Next maintenance scheduled for {next_schedule.scheduled_date.strftime('%Y-%m-%d %H:%M')}."
+        
+        return Response(response_data, status=status.HTTP_200_OK)
 
     def _handle_scheduled_status(self, maintenance_schedule):
+        """Handle completion of a scheduled maintenance."""
         maintenance_schedule.status = 'completed'
         maintenance_schedule.save()
+        
+        next_schedule = self._generate_next_schedule(maintenance_schedule)
+        
         serializer = MaintenanceScheduleSerializer(maintenance_schedule)
-        return Response({
+        response_data = {
             "detail": "The maintenance schedule has been completed.",
             "schedule": serializer.data
-        }, status=status.HTTP_200_OK)
-
+        }
+        
+        if next_schedule:
+            next_serializer = MaintenanceScheduleSerializer(next_schedule)
+            response_data["next_schedule"] = next_serializer.data
+            response_data["detail"] += f" Next maintenance scheduled for {next_schedule.scheduled_date.strftime('%Y-%m-%d %H:%M')}."
+        
+        return Response(response_data, status=status.HTTP_200_OK)
 
 class CreateBuildingAdhocScheduleView(APIView):
     """
@@ -448,45 +653,22 @@ class CompleteBuildingScheduleView(APIView):
     API View to handle completion of building-level maintenance schedules.
     
     This view processes the completion of maintenance schedules for multiple elevators
-    within a building, creating the necessary maintenance records, condition reports,
-    and logs for each elevator.
+    within a building by creating the necessary maintenance records, condition reports,
+    and logs for each elevator. The technician needs to supply only the elevator UUIDs.
     
     Endpoint: POST /api/jobs/buildings/<uuid:building_schedule_id>/complete-schedule/
     
     Request body format:
     {
         "elevators": [
-            {
-                "elevator_id": "uuid",
-                "condition_report": {
-                    "components_checked": "string",
-                    "condition": "string"
-                },
-                "maintenance_log": {
-                    "summary_title": "string",
-                    "description": "string",
-                    "overseen_by": "string"
-                }
-            }
+            "2c26e342-db96-4490-845c-f1b871004b34",
+            "e8a7d210-3c1e-4c9c-a27b-0d44f0e4b5d2"
         ]
     }
     """
-    
     permission_classes = [AllowAny]
 
     def _validate_building_schedule(self, building_schedule_id):
-        """
-        Validate and retrieve the building schedule.
-        
-        Args:
-            building_schedule_id: UUID of the building schedule
-            
-        Returns:
-            BuildingLevelAdhocSchedule object if valid
-            
-        Raises:
-            Response with error if invalid
-        """
         try:
             building_schedule_uuid = UUID(str(building_schedule_id))
         except ValueError:
@@ -503,96 +685,112 @@ class CompleteBuildingScheduleView(APIView):
 
         return building_schedule
 
-    def _validate_elevators(self, elevators_data, building):
+    def _validate_elevators(self, elevator_uuid_list, building):
         """
-        Validate that all elevators exist and belong to the building.
-        
-        Args:
-            elevators_data: List of elevator data from request
-            building: Building object
-            
-        Returns:
-            tuple: (list of failed elevators, bool indicating if validation passed)
+        Validate that each provided elevator UUID is valid and corresponds to an existing Elevator in the building.
+        Returns a tuple: (list_of_failed_elevator_messages, validation_success_boolean)
         """
         failed_elevators = []
 
-        for elevator_data in elevators_data:
-            elevator_id = elevator_data.get("elevator_id")
-
+        for elevator_uuid in elevator_uuid_list:
             try:
-                elevator_uuid = UUID(str(elevator_id))
+                # Validate the UUID format
+                UUID(str(elevator_uuid))
             except ValueError:
-                failed_elevators.append(f"Elevator ID {elevator_id} is not a valid UUID.")
+                failed_elevators.append(f"Elevator ID '{elevator_uuid}' is not a valid UUID.")
                 continue
 
             elevator = Elevator.objects.filter(id=elevator_uuid, building=building).first()
             if not elevator:
-                failed_elevators.append(
-                    f"Elevator ID {elevator_uuid} does not exist or does not belong to this building."
-                )
+                failed_elevators.append(f"Elevator with UUID '{elevator_uuid}' does not exist or does not belong to this building.")
 
         return failed_elevators, len(failed_elevators) == 0
 
-    def _process_elevator(self, elevator_data, building, building_schedule):
+    def _process_elevator(self, elevator_uuid, building, building_schedule):
         """
-        Process a single elevator's maintenance records.
-        
-        Args:
-            elevator_data: Dict containing elevator data
-            building: Building object
-            building_schedule: BuildingLevelAdhocSchedule object
-            
-        Returns:
-            tuple: (elevator username or None, error message or None)
+        Process a single elevator's maintenance records using default values.
+        After the maintenance log is created, an alert is sent to the developer for approval.
         """
         try:
-            elevator_uuid = UUID(str(elevator_data.get("elevator_id")))
             elevator = get_object_or_404(Elevator, id=elevator_uuid, building=building)
 
-            # Create Ad-Hoc Maintenance Schedule
+            # Create the Ad-Hoc Maintenance Schedule
             ad_hoc_schedule = AdHocMaintenanceSchedule.objects.create(
                 elevator=elevator,
                 technician=building_schedule.technician,
                 maintenance_company=building_schedule.maintenance_company,
                 scheduled_date=building_schedule.scheduled_date,
-                description=f"A system-generated maintenance schedule based on the building-level ad-hoc schedule of "
-                           f"{building_schedule.scheduled_date.strftime('%Y-%m-%d')}, intended to {building_schedule.description}.",
+                description=(
+                    f"A system-generated maintenance schedule based on the building-level ad-hoc schedule of "
+                    f"{building_schedule.scheduled_date.strftime('%Y-%m-%d')}, intended to {building_schedule.description}."
+                ),
                 status='completed'
             )
 
-            # Create Condition Report
-            condition_report_data = elevator_data.get("condition_report", {})
+            # Create a default Condition Report
             condition_report = AdHocElevatorConditionReport.objects.create(
                 ad_hoc_schedule=ad_hoc_schedule,
                 technician=building_schedule.technician,
                 date_inspected=timezone.now(),
-                components_checked=condition_report_data.get("components_checked", ""),
-                condition=condition_report_data.get("condition", ""),
+                components_checked="Default components check - all components normal.",
+                condition="Good"
             )
 
-            # Create Maintenance Log
-            maintenance_log_data = elevator_data.get("maintenance_log", {})
-            AdHocMaintenanceLog.objects.create(
+            # Create a default Maintenance Log
+            maintenance_log = AdHocMaintenanceLog.objects.create(
                 ad_hoc_schedule=ad_hoc_schedule,
                 technician=building_schedule.technician,
                 condition_report=condition_report,
                 date_completed=timezone.now(),
-                summary_title=maintenance_log_data.get("summary_title", ""),
-                description=maintenance_log_data.get("description", ""),
-                overseen_by=maintenance_log_data.get("overseen_by", ""),
+                summary_title="Auto-generated maintenance log",
+                description="Maintenance log auto-generated based on building-level schedule completion.",
+                overseen_by="System"
             )
+
+            # Send Alert to Developer for review
+            # Assumes the building (or building_schedule.building) has a 'developer' attribute.
+            if hasattr(building, 'developer') and building.developer:
+                AlertService.create_alert(
+                    alert_type=AlertType.LOG_ADDED,
+                    recipient=building.developer,
+                    related_object=ad_hoc_schedule,
+                    message=(
+                        f"New maintenance log added for elevator {elevator.machine_number} by technician {building_schedule.technician}. "
+                        f"Please review and approve."
+                    )
+                )
+            else:
+                logger.warning(
+                    f"Developer not found for building {building.id}; no alert sent for elevator {elevator.machine_number}."
+                )
 
             return elevator.user_name, None
         except Exception as e:
-            return None, f"Error processing elevator ID {elevator_data.get('elevator_id')}: {str(e)}"
+            logger.error(f"Error processing elevator with UUID {elevator_uuid}: {str(e)}")
+            return None, f"Error processing elevator with UUID {elevator_uuid}: {str(e)}"
 
     @swagger_auto_schema(
-        request_body=BuildingScheduleCompletionSerializer,
-        operation_description="Complete a building-level maintenance schedule",
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            properties={
+                'elevators': openapi.Schema(
+                    type=openapi.TYPE_ARRAY,
+                    items=openapi.Schema(type=openapi.TYPE_STRING, format="uuid"),
+                    description="List of elevator UUIDs"
+                )
+            },
+            example={
+                "elevators": [
+                    "2c26e342-db96-4490-845c-f1b871004b34",
+                    "e8a7d210-3c1e-4c9c-a27b-0d44f0e4b5d2"
+                ]
+            }
+        ),
+        operation_description="Complete a building-level maintenance schedule using only elevator UUIDs",
         responses={
-                200: openapi.Response(
-                    description="Schedule completion status",
-                    examples={
+            200: openapi.Response(
+                description="Schedule completion status",
+                examples={
                     "application/json": {
                         "message": "Success message",
                         "failed_elevators": ["List of errors if any"]
@@ -635,12 +833,11 @@ class CompleteBuildingScheduleView(APIView):
         if isinstance(building_schedule, Response):
             return building_schedule
 
-        # Get building and elevator data
         building = building_schedule.building
-        elevators_data = request.data.get("elevators", [])
+        elevator_uuid_list = request.data.get("elevators", [])
 
-        # Validate all elevators
-        failed_elevators, is_valid = self._validate_elevators(elevators_data, building)
+        # Validate all provided elevator UUIDs
+        failed_elevators, is_valid = self._validate_elevators(elevator_uuid_list, building)
         if not is_valid:
             return Response({
                 "message": "Some elevators do not belong to this building or do not exist.",
@@ -649,33 +846,35 @@ class CompleteBuildingScheduleView(APIView):
 
         # Process each elevator
         successful_elevators = []
-        for elevator_data in elevators_data:
-            elevator_name, error = self._process_elevator(elevator_data, building, building_schedule)
+        for elevator_uuid in elevator_uuid_list:
+            elevator_name, error = self._process_elevator(elevator_uuid, building, building_schedule)
             if elevator_name:
                 successful_elevators.append(elevator_name)
             if error:
                 failed_elevators.append(error)
 
-        # Update building schedule status if all successful
+        # Update building schedule status to 'completed' if all processing was successful
         if not failed_elevators:
             building_schedule.status = 'completed'
             building_schedule.save()
 
-        # Prepare response message
+        # Prepare the response message
         if successful_elevators:
-            message = (f"{len(successful_elevators)} elevators ({', '.join(successful_elevators)}) were successfully "
-                      f"checked during this building schedule and their condition reports and maintenance logs were "
-                      f"generated and recorded.")
+            message = (
+                f"{len(successful_elevators)} elevator(s) ({', '.join(successful_elevators)}) were successfully processed. "
+                "Their condition reports and maintenance logs were generated and recorded."
+            )
         else:
-            message = "No elevators were successfully checked during this building schedule."
+            message = "No elevators were successfully processed."
 
         if failed_elevators:
-            message = "Some elevators failed during the process: " + "; ".join(failed_elevators)
+            message = "Some errors occurred: " + "; ".join(failed_elevators)
 
         return Response({
             "message": message,
             "failed_elevators": failed_elevators
         }, status=status.HTTP_200_OK)
+
 
 class MaintenanceScheduleDeleteView(APIView):
     """
@@ -778,13 +977,33 @@ class TechnicianMaintenanceSchedulesView(APIView):
         except TechnicianProfile.DoesNotExist:
             return None
 
+    def update_schedule_status(self, schedule):
+        """
+        Update the status of a schedule to 'overdue' if needed.
+        """
+        current_time = timezone.now()
+        if schedule.scheduled_date < current_time and schedule.status == 'scheduled':
+            schedule.status = 'overdue'
+            schedule.save()
+        return schedule
+
     def get_schedules(self, technician):
         """
-        Fetch all maintenance schedules for the given technician.
+        Fetch all maintenance schedules for the given technician and update their status if needed.
         """
+        # Get all schedules
         regular_schedules = MaintenanceSchedule.objects.filter(technician=technician)
         adhoc_schedules = AdHocMaintenanceSchedule.objects.filter(technician=technician)
         building_adhoc_schedules = BuildingLevelAdhocSchedule.objects.filter(technician=technician)
+
+        # Update status for overdue schedules
+        for schedule in regular_schedules:
+            self.update_schedule_status(schedule)
+        for schedule in adhoc_schedules:
+            self.update_schedule_status(schedule)
+        for schedule in building_adhoc_schedules:
+            self.update_schedule_status(schedule)
+
         return regular_schedules, adhoc_schedules, building_adhoc_schedules
 
     def serialize_schedules(self, regular_schedules, adhoc_schedules, building_adhoc_schedules):
@@ -805,11 +1024,16 @@ class TechnicianMaintenanceSchedulesView(APIView):
             return Response({"detail": "Technician not found."}, status=status.HTTP_404_NOT_FOUND)
 
         regular_schedules, adhoc_schedules, building_adhoc_schedules = self.get_schedules(technician)
-
+        
         if not (regular_schedules.exists() or adhoc_schedules.exists() or building_adhoc_schedules.exists()):
-            return Response({"detail": "No maintenance schedules found for this technician."}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {"detail": "No maintenance schedules found for this technician."}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
 
-        regular_serializer, adhoc_serializer, building_adhoc_serializer = self.serialize_schedules(regular_schedules, adhoc_schedules, building_adhoc_schedules)
+        regular_serializer, adhoc_serializer, building_adhoc_serializer = self.serialize_schedules(
+            regular_schedules, adhoc_schedules, building_adhoc_schedules
+        )
 
         response_data = {
             "regular_schedules": regular_serializer.data,
@@ -818,7 +1042,6 @@ class TechnicianMaintenanceSchedulesView(APIView):
         }
 
         return Response(response_data, status=status.HTTP_200_OK)
-
 
 class MaintenanceScheduleListView(APIView):
     """
@@ -1512,16 +1735,8 @@ class MaintenanceScheduleFilterView(APIView):
 
 class MaintenanceCompanyJobStatusView(APIView):
     permission_classes = [AllowAny]
-    """
-    Retrieve regular, ad-hoc, and building-level ad-hoc maintenance schedules 
-    for a specific maintenance company based on job status.
-    
-    Expects:
-      - company_uuid: a UUID representing the maintenance company.
-      - job_status: one of "upcoming_jobs", "overdue_jobs", "completed_jobs".
-    """
+
     def get(self, request, company_uuid, job_status):
-        # Validate the Maintenance Company using its UUID (assuming it's stored in the `id` field)
         try:
             maintenance_company = MaintenanceCompanyProfile.objects.get(id=company_uuid)
         except MaintenanceCompanyProfile.DoesNotExist:
@@ -1530,11 +1745,20 @@ class MaintenanceCompanyJobStatusView(APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        # Mapping for job status to filtering options
         filter_mapping = {
-            "upcoming_jobs": {"status": "scheduled", "order_by": "scheduled_date"},
-            "overdue_jobs": {"status": "overdue", "order_by": "-scheduled_date"},
-            "completed_jobs": {"status": "completed", "order_by": None},
+            "upcoming_jobs": {
+                "status": "scheduled",
+                "date_filter": {"scheduled_date__gt": timezone.now()},
+                "order_by": "scheduled_date"
+            },
+            "overdue_jobs": {
+                "status": "overdue",
+                "order_by": "-scheduled_date"
+            },
+            "completed_jobs": {
+                "status": "completed",
+                "order_by": "-scheduled_date"
+            },
         }
 
         if job_status not in filter_mapping:
@@ -1543,34 +1767,31 @@ class MaintenanceCompanyJobStatusView(APIView):
             }, status=status.HTTP_400_BAD_REQUEST)
 
         filter_options = filter_mapping[job_status]
-        status_value = filter_options["status"]
-        order_by_field = filter_options["order_by"]
+        filter_kwargs = {
+            "maintenance_company": maintenance_company,
+            "status": filter_options["status"]
+        }
+        
+        if "date_filter" in filter_options:
+            filter_kwargs.update(filter_options["date_filter"])
 
-        # Filter schedules for the maintenance company based on the job status
-        regular_schedules = MaintenanceSchedule.objects.filter(
-            maintenance_company=maintenance_company,
-            status=status_value
-        )
-        adhoc_schedules = AdHocMaintenanceSchedule.objects.filter(
-            maintenance_company=maintenance_company,
-            status=status_value
-        )
-        building_adhoc_schedules = BuildingLevelAdhocSchedule.objects.filter(
-            maintenance_company=maintenance_company,
-            status=status_value
-        )
+        # Debugging output
+        print(f"Filtering MaintenanceSchedule with: {filter_kwargs}")
 
-        if order_by_field:
-            regular_schedules = regular_schedules.order_by(order_by_field)
-            adhoc_schedules = adhoc_schedules.order_by(order_by_field)
-            building_adhoc_schedules = building_adhoc_schedules.order_by(order_by_field)
+        # Query and order schedules
+        regular_schedules = MaintenanceSchedule.objects.filter(**filter_kwargs).order_by(filter_options["order_by"])
+        adhoc_schedules = AdHocMaintenanceSchedule.objects.filter(**filter_kwargs).order_by(filter_options["order_by"])
+        building_adhoc_schedules = BuildingLevelAdhocSchedule.objects.filter(**filter_kwargs).order_by(filter_options["order_by"])
 
-        # Serialize the schedule querysets
+        # Debugging output
+        print(f"Found {regular_schedules.count()} regular schedules")
+        print(f"Found {adhoc_schedules.count()} adhoc schedules")
+        print(f"Found {building_adhoc_schedules.count()} building-level adhoc schedules")
+
         serialized_regular = CompleteMaintenanceScheduleSerializer(regular_schedules, many=True)
         serialized_adhoc = CompleteMaintenanceScheduleSerializer(adhoc_schedules, many=True)
         serialized_building_adhoc = BuildingLevelAdhocScheduleSerializer(building_adhoc_schedules, many=True)
 
-        # Return the combined response
         return Response({
             'regular_schedules': serialized_regular.data,
             'adhoc_schedules': serialized_adhoc.data,
@@ -1579,6 +1800,7 @@ class MaintenanceCompanyJobStatusView(APIView):
 
 class TechnicianJobStatusView(APIView):
     permission_classes = [AllowAny]
+
     """
     Retrieve regular, ad-hoc, and building-level ad-hoc maintenance schedules
     for a specific technician based on job status.
@@ -1594,19 +1816,22 @@ class TechnicianJobStatusView(APIView):
 
         # Filter schedules based on job status
         if job_status == "upcoming_jobs":
-            regular_schedules = regular_schedules.filter(status="scheduled").order_by('scheduled_date')
-            adhoc_schedules = adhoc_schedules.filter(status="scheduled").order_by('scheduled_date')
-            building_adhoc_schedules = building_adhoc_schedules.filter(status="scheduled").order_by('scheduled_date')
+            # Filter for scheduled jobs (upcoming jobs)
+            regular_schedules = regular_schedules.filter(status="scheduled", scheduled_date__gte=timezone.now()).order_by('scheduled_date')
+            adhoc_schedules = adhoc_schedules.filter(status="scheduled", scheduled_date__gte=timezone.now()).order_by('scheduled_date')
+            building_adhoc_schedules = building_adhoc_schedules.filter(status="scheduled", scheduled_date__gte=timezone.now()).order_by('scheduled_date')
 
         elif job_status == "overdue_jobs":
-            regular_schedules = regular_schedules.filter(status="overdue").order_by('-scheduled_date')
-            adhoc_schedules = adhoc_schedules.filter(status="overdue").order_by('-scheduled_date')
-            building_adhoc_schedules = building_adhoc_schedules.filter(status="overdue").order_by('-scheduled_date')
+            # Filter for overdue jobs
+            regular_schedules = regular_schedules.filter(status="overdue", scheduled_date__lt=timezone.now()).order_by('-scheduled_date')
+            adhoc_schedules = adhoc_schedules.filter(status="overdue", scheduled_date__lt=timezone.now()).order_by('-scheduled_date')
+            building_adhoc_schedules = building_adhoc_schedules.filter(status="overdue", scheduled_date__lt=timezone.now()).order_by('-scheduled_date')
 
         elif job_status == "completed_jobs":
-            regular_schedules = regular_schedules.filter(status="completed")
-            adhoc_schedules = adhoc_schedules.filter(status="completed")
-            building_adhoc_schedules = building_adhoc_schedules.filter(status="completed")
+            # Filter for completed jobs
+            regular_schedules = regular_schedules.filter(status="completed").order_by('-scheduled_date')
+            adhoc_schedules = adhoc_schedules.filter(status="completed").order_by('-scheduled_date')
+            building_adhoc_schedules = building_adhoc_schedules.filter(status="completed").order_by('-scheduled_date')
 
         else:
             return Response({
@@ -1675,96 +1900,101 @@ class FileMaintenanceLogView(APIView):
             'schedule_type': openapi.Schema(
                 type=openapi.TYPE_STRING,
                 enum=['regular', 'adhoc'],
-                description='Type of maintenance schedule. Affects required fields in maintenance_log.'
+                description='Type of maintenance schedule'
             ),
             'condition_report': openapi.Schema(
                 type=openapi.TYPE_OBJECT,
-                required=['components_checked', 'condition'],
+                required=['maintenance_schedule', 'technician'],
                 properties={
-                    'components_checked': openapi.Schema(
-                        type=openapi.TYPE_STRING,
-                        description='List of components that were checked (REQUIRED)'
+                    'maintenance_schedule': openapi.Schema(
+                        type=openapi.TYPE_STRING, 
+                        description='UUID of maintenance schedule'
                     ),
-                    'condition': openapi.Schema(
-                        type=openapi.TYPE_STRING,
-                        description='Overall condition status (REQUIRED)'
+                    'technician': openapi.Schema(
+                        type=openapi.TYPE_STRING, 
+                        description='Technician ID'
                     ),
-                    'overall_condition': openapi.Schema(
+                    'alarm_bell': openapi.Schema(
                         type=openapi.TYPE_STRING,
-                        description='Detailed condition assessment'
+                        enum=['Functional', 'Intermittent', 'Non-Functional'],
+                        description='Alarm bell condition'
                     ),
-                    'notes': openapi.Schema(
+                    'noise_during_motion': openapi.Schema(
                         type=openapi.TYPE_STRING,
-                        description='Additional notes'
+                        enum=['Silent', 'Minimal', 'Moderate', 'Loud', 'Excessive'],
+                        description='Noise during elevator operation'
                     ),
+                    'cabin_lights': openapi.Schema(
+                        type=openapi.TYPE_STRING,
+                        enum=['All Working', 'Partial Failure', 'Complete Failure'],
+                        description='Cabin lighting system status'
+                    ),
+                    'additional_comments': openapi.Schema(
+                        type=openapi.TYPE_STRING,
+                        description='Additional technician observations'
+                    )
                 }
             ),
             'maintenance_log': openapi.Schema(
                 type=openapi.TYPE_OBJECT,
-                description='Fields vary by schedule_type. Regular requires equipment checks, Ad-hoc requires summary.',
-                required=[],  # Required fields enforced in view validation
+                required=['performed_tasks'],
                 properties={
-                    # Regular maintenance fields
-                    'check_machine_gear': openapi.Schema(
-                        type=openapi.TYPE_BOOLEAN,
-                        description='(Regular REQUIRED) Machine gear check status'
+                    'performed_tasks': openapi.Schema(
+                        type=openapi.TYPE_ARRAY,
+                        items=openapi.Schema(
+                            type=openapi.TYPE_OBJECT,
+                            properties={
+                                'task_name': openapi.Schema(
+                                    type=openapi.TYPE_STRING,
+                                    description='Name of maintenance task'
+                                ),
+                                'status': openapi.Schema(
+                                    type=openapi.TYPE_STRING,
+                                    enum=['completed', 'partial', 'not_completed'],
+                                    description='Task completion status'
+                                ),
+                                'observations': openapi.Schema(
+                                    type=openapi.TYPE_STRING,
+                                    description='Task-specific observations'
+                                )
+                            }
+                        ),
+                        description='List of performed maintenance tasks'
                     ),
-                    'check_machine_brake': openapi.Schema(
-                        type=openapi.TYPE_BOOLEAN,
-                        description='(Regular REQUIRED) Machine brake check status'
-                    ),
-                    'check_controller_connections': openapi.Schema(
-                        type=openapi.TYPE_BOOLEAN,
-                        description='(Regular REQUIRED) Controller connections check status'
-                    ),
-                    'blow_dust_from_controller': openapi.Schema(
-                        type=openapi.TYPE_BOOLEAN,
-                        description='(Regular REQUIRED) Controller dust removal status'
-                    ),
-                    'clean_machine_room': openapi.Schema(
-                        type=openapi.TYPE_BOOLEAN,
-                        description='(Regular REQUIRED) Machine room cleaning status'
-                    ),
-                    'clean_guide_rails': openapi.Schema(
-                        type=openapi.TYPE_BOOLEAN,
-                        description='(Regular REQUIRED) Guide rails cleaning status'
-                    ),
-                    'observe_operation': openapi.Schema(
-                        type=openapi.TYPE_BOOLEAN,
-                        description='(Regular REQUIRED) Operation observation status'
-                    ),
-                    # Ad-hoc maintenance fields
-                    'summary_title': openapi.Schema(
-                        type=openapi.TYPE_STRING,
-                        description='(Ad-hoc REQUIRED) Brief summary of the work done'
-                    ),
-                    # Common fields
                     'description': openapi.Schema(
                         type=openapi.TYPE_STRING,
-                        description='Detailed maintenance description'
+                        description='Comprehensive maintenance description'
                     ),
                     'overseen_by': openapi.Schema(
                         type=openapi.TYPE_STRING,
-                        description='Name of supervisor overseeing maintenance'
+                        description='Supervisor overseeing maintenance'
                     ),
                     'approved_by': openapi.Schema(
                         type=openapi.TYPE_STRING,
-                        description='Name of person approving maintenance'
+                        description='Maintenance approval authority'
                     ),
+                    # Checklist fields
+                    'check_machine_gear': openapi.Schema(type=openapi.TYPE_BOOLEAN, description="Checked machine gear"),
+                    'check_machine_brake': openapi.Schema(type=openapi.TYPE_BOOLEAN, description="Checked machine brake"),
+                    'check_controller_connections': openapi.Schema(type=openapi.TYPE_BOOLEAN, description="Checked controller connections"),
+                    'blow_dust_from_controller': openapi.Schema(type=openapi.TYPE_BOOLEAN, description="Blown dust from controller"),
+                    'clean_machine_room': openapi.Schema(type=openapi.TYPE_BOOLEAN, description="Cleaned machine room"),
+                    'clean_guide_rails': openapi.Schema(type=openapi.TYPE_BOOLEAN, description="Cleaned guide rails"),
+                    'observe_operation': openapi.Schema(type=openapi.TYPE_BOOLEAN, description="Observed operation"),
                 }
             )
         }
     )
 
     @swagger_auto_schema(
-        operation_description="File a maintenance log with condition report",
+        operation_description="File a comprehensive maintenance log with condition report",
         request_body=maintenance_request_schema,
         responses={
             200: openapi.Response(description="Maintenance log successfully created"),
-            400: openapi.Response(description="Bad request"),
+            400: openapi.Response(description="Validation error"),
             404: openapi.Response(description="Schedule not found")
         }
-    ) 
+    )
     def post(self, request, schedule_id):
         try:
             schedule_uuid = UUID(str(schedule_id).strip().lower())
@@ -1775,13 +2005,13 @@ class FileMaintenanceLogView(APIView):
             )
 
         schedule_type = request.data.get('schedule_type')
-        if not schedule_type or schedule_type not in ['regular', 'adhoc']:
+        if schedule_type not in ['regular', 'adhoc']:
             return Response(
                 {"detail": "Invalid schedule type. Must be either 'regular' or 'adhoc'."},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Select appropriate models based on schedule type
+        # Determine appropriate models based on schedule type
         if schedule_type == 'regular':
             ScheduleModel = MaintenanceSchedule
             ConditionReportSerializer = ElevatorConditionReportSerializer
@@ -1793,10 +2023,9 @@ class FileMaintenanceLogView(APIView):
             MaintenanceLogSerializer = AdHocMaintenanceLogSerializer
             schedule_field = 'ad_hoc_schedule'
 
-        # Fetch schedule
+        # Fetch and validate schedule
         maintenance_schedule = get_object_or_404(ScheduleModel, id=schedule_uuid)
 
-        # Validate schedule state
         if not maintenance_schedule.technician:
             return Response({"detail": "No technician assigned."}, status=status.HTTP_400_BAD_REQUEST)
         if not maintenance_schedule.maintenance_company:
@@ -1805,7 +2034,7 @@ class FileMaintenanceLogView(APIView):
             return Response({"detail": "Schedule already completed."}, status=status.HTTP_400_BAD_REQUEST)
 
         # Process condition report
-        condition_report_data = request.data.get('condition_report')
+        condition_report_data = request.data.get('condition_report', {})
         if not condition_report_data:
             return Response({"detail": "Condition report required."}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1816,7 +2045,7 @@ class FileMaintenanceLogView(APIView):
 
         condition_report_serializer = ConditionReportSerializer(data=condition_report_data)
         if not condition_report_serializer.is_valid():
-            return Response(condition_report_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": str(condition_report_serializer.errors)}, status=status.HTTP_400_BAD_REQUEST)
         condition_report = condition_report_serializer.save()
 
         # Process maintenance log
@@ -1824,40 +2053,77 @@ class FileMaintenanceLogView(APIView):
         if not maintenance_log_data:
             return Response({"detail": "Maintenance log data required."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Validate type-specific requirements
-        if schedule_type == 'adhoc':
-            if not maintenance_log_data.get('summary_title'):
-                return Response({"detail": "Summary title required for ad-hoc maintenance."}, status=status.HTTP_400_BAD_REQUEST)
-        else:
-            required_fields = [
+        # Validate required fields based on schedule type
+        if schedule_type == 'regular':
+            checklist_fields = [
                 'check_machine_gear', 'check_machine_brake', 'check_controller_connections',
                 'blow_dust_from_controller', 'clean_machine_room', 'clean_guide_rails', 'observe_operation'
             ]
-            for field in required_fields:
-                if field not in maintenance_log_data:
-                    return Response({"detail": f"Field '{field}' required for regular maintenance."}, status=status.HTTP_400_BAD_REQUEST)
-                if not isinstance(maintenance_log_data[field], bool):
-                    return Response({"detail": f"Field '{field}' must be boolean."}, status=status.HTTP_400_BAD_REQUEST)
+            missing_fields = [field for field in checklist_fields if field not in maintenance_log_data]
+            if missing_fields:
+                return Response(
+                    {"detail": f"Missing required fields: {', '.join(missing_fields)}"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        elif schedule_type == 'adhoc' and 'summary_title' not in maintenance_log_data:
+            return Response(
+                {"detail": "Summary title required for ad-hoc maintenance."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
-        # Prepare maintenance log data
         maintenance_log_data.update({
             'technician': maintenance_schedule.technician.id,
             'condition_report': condition_report.id,
             schedule_field: maintenance_schedule.id,
-            'date_completed': now()
+            'date_completed': timezone.now()
         })
 
         # Create maintenance log
         maintenance_log_serializer = MaintenanceLogSerializer(data=maintenance_log_data)
         if not maintenance_log_serializer.is_valid():
-            return Response(maintenance_log_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        maintenance_log_serializer.save()
+            return Response({"detail": str(maintenance_log_serializer.errors)}, status=status.HTTP_400_BAD_REQUEST)
+        maintenance_log = maintenance_log_serializer.save()
 
-        # Update schedule status
-        maintenance_schedule.status = 'completed'
+        # Update schedule status based on scheduled date
+        if maintenance_schedule.scheduled_date < timezone.now():
+            maintenance_schedule.status = 'overdue'
+        else:
+            maintenance_schedule.status = 'completed'
         maintenance_schedule.save()
 
+        # Create alert for developer approval
+        try:
+            developer = maintenance_schedule.elevator.building.developer
+            elevator = maintenance_schedule.elevator
+            
+            # Create alert for developer approval
+            AlertService.create_alert(
+                alert_type=AlertType.MAINTENANCE_APPROVAL_NEEDED,
+                recipient=developer,
+                related_object=maintenance_schedule,
+                message=(
+                    f"Maintenance completed for elevator {elevator.machine_number} "
+                    f"in building {elevator.building.name}. Please review and approve "
+                    f"the maintenance log."
+                )
+            )
+
+            # Create notification alert for maintenance company
+            AlertService.create_alert(
+                alert_type=AlertType.LOG_ADDED,
+                recipient=maintenance_schedule.maintenance_company,
+                related_object=maintenance_schedule,
+                message=(
+                    f"Maintenance log submitted for elevator {elevator.machine_number} "
+                    f"in building {elevator.building.name}. Awaiting developer approval."
+                )
+            )
+
+        except Exception as e:
+            # Log the error but don't fail the request
+            logger.error(f"Failed to create maintenance approval alert: {str(e)}")
+
         return Response(
-            {"detail": f"{schedule_type.capitalize()} maintenance completed successfully."},
+            {"detail": f"{schedule_type.capitalize()} maintenance completed successfully and sent for approval."},
             status=status.HTTP_200_OK
-        )
+        ) 
