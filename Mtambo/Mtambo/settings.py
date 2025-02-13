@@ -73,6 +73,7 @@ INSTALLED_APPS = [
     'buildings',
     'jobs',
     'alerts',
+    'brokers',
     'django_celery_beat',
     'django_celery_results',
     'django_filters',

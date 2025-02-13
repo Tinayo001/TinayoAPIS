@@ -77,4 +77,19 @@ class Elevator(models.Model):
             models.Index(fields=['installation_date']),
         ]
     def str(self):
-        return f"{self.machine_number} - {self.user_name} - {self.building.name}" 
+        return f"{self.machine_number} - {self.user_name} - {self.building.name}"
+
+class ElevatorIssueLog(models.Model):
+    elevator = models.ForeignKey(Elevator, on_delete=models.CASCADE, related_name="issue_logs")
+    developer = models.ForeignKey(DeveloperProfile, on_delete=models.SET_NULL, null=True, blank=True, related_name="reported_issues")
+    building = models.ForeignKey(Building, on_delete=models.CASCADE, related_name="elevator_issue_logs")
+    reported_date = models.DateTimeField(auto_now_add=True, help_text="The date and time when the issue was reported.")
+    issue_description = models.TextField(help_text="A detailed description of the elevator issue reported by the developer.")
+
+    def __str__(self):
+        return f"Issue reported for Elevator: {self.elevator.user_name} in Building: {self.building.name} on {self.reported_date.strftime('%Y-%m-%d %H:%M:%S')}"
+
+    class Meta:
+        verbose_name = "Elevator Issue Log"
+        verbose_name_plural = "Elevator Issue Logs"
+        ordering = ['-reported_date']

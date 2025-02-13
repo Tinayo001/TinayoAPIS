@@ -1,3 +1,5 @@
+from rest_framework.decorators import permission_classes
+from rest_framework.permissions import IsAuthenticated
 from django.http import JsonResponse
 from django.core.exceptions import ObjectDoesNotExist
 from rest_framework.permissions import IsAuthenticated
@@ -644,27 +646,31 @@ class CreateBuildingAdhocScheduleView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        # Create alert for the technician
+        if elevator.technician:
+            try:
+                AlertService.create_alert(
+                    alert_type=AlertType.ADHOC_MAINTENANCE_SCHEDULED,
+                    recipient=elevator.technician,
+                    related_object=adhoc_schedule,
+                    message=(
+                        f"A new ad-hoc maintenance schedule has been assigned to you "
+                        f"for building {building.name}, with description: {adhoc_schedule.description}"
+                    )
+                )
+            except Exception as e:
+                return Response(
+                    {'detail': f'Error creating alert: {str(e)}'},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+
         # Return created schedule
         output_serializer = BuildingLevelAdhocScheduleSerializer(adhoc_schedule)
         return Response(output_serializer.data, status=status.HTTP_201_CREATED)
 
 class CompleteBuildingScheduleView(APIView):
     """
-    API View to handle completion of building-level maintenance schedules.
-    
-    This view processes the completion of maintenance schedules for multiple elevators
-    within a building by creating the necessary maintenance records, condition reports,
-    and logs for each elevator. The technician needs to supply only the elevator UUIDs.
-    
-    Endpoint: POST /api/jobs/buildings/<uuid:building_schedule_id>/complete-schedule/
-    
-    Request body format:
-    {
-        "elevators": [
-            "2c26e342-db96-4490-845c-f1b871004b34",
-            "e8a7d210-3c1e-4c9c-a27b-0d44f0e4b5d2"
-        ]
-    }
+    API View to handle completion of building-level maintenance schedules with detailed reports.
     """
     permission_classes = [AllowAny]
 
@@ -685,77 +691,106 @@ class CompleteBuildingScheduleView(APIView):
 
         return building_schedule
 
-    def _validate_elevators(self, elevator_uuid_list, building):
+    def _validate_elevator_data(self, elevator_data, building):
         """
-        Validate that each provided elevator UUID is valid and corresponds to an existing Elevator in the building.
-        Returns a tuple: (list_of_failed_elevator_messages, validation_success_boolean)
+        Validate elevator data including maintenance and condition report details.
         """
-        failed_elevators = []
+        errors = []
+    
+        # Check for empty elevator list
+        if not elevator_data:
+            errors.append("No elevators provided. Please include at least one elevator.")
+            return errors
 
-        for elevator_uuid in elevator_uuid_list:
+        # Track processed elevator IDs to catch duplicates
+        processed_elevator_ids = set()
+    
+        for elevator_entry in elevator_data:
             try:
-                # Validate the UUID format
-                UUID(str(elevator_uuid))
-            except ValueError:
-                failed_elevators.append(f"Elevator ID '{elevator_uuid}' is not a valid UUID.")
+                elevator_uuid = UUID(str(elevator_entry.get('elevator_id')))
+            
+                # Check for duplicate elevator IDs
+                if elevator_uuid in processed_elevator_ids:
+                    errors.append(f"Duplicate elevator ID: {elevator_uuid}. Each elevator can only be processed once.")
+                    continue
+                
+                processed_elevator_ids.add(elevator_uuid)
+            
+            except (ValueError, TypeError):
+                errors.append(f"Invalid elevator ID format: {elevator_entry.get('elevator_id')}. Please provide a valid UUID.")
                 continue
-
+        
+            # Rest of the validation logic remains the same...
             elevator = Elevator.objects.filter(id=elevator_uuid, building=building).first()
             if not elevator:
-                failed_elevators.append(f"Elevator with UUID '{elevator_uuid}' does not exist or does not belong to this building.")
+                errors.append(f"Elevator with UUID {elevator_uuid} does not exist or does not belong to this building.")
+                continue
 
-        return failed_elevators, len(failed_elevators) == 0
+            # Validate condition report
+            condition_report = elevator_entry.get('condition_report', {})
+            if not condition_report.get('components_checked'):
+                errors.append(f"Components checked not specified for elevator {elevator_uuid}")
+            if not condition_report.get('condition'):
+                errors.append(f"Condition not specified for elevator {elevator_uuid}")
 
-    def _process_elevator(self, elevator_uuid, building, building_schedule):
+            # Validate maintenance log
+            maintenance_log = elevator_entry.get('maintenance_log', {})
+            if not maintenance_log.get('summary_title'):
+                errors.append(f"Summary title not specified for elevator {elevator_uuid}")
+            if not maintenance_log.get('description'):
+                errors.append(f"Description not specified for elevator {elevator_uuid}")
+            if not maintenance_log.get('overseen_by'):
+                errors.append(f"Overseen by not specified for elevator {elevator_uuid}")
+
+        return errors 
+    def _process_elevator(self, elevator_data, building, building_schedule):
         """
-        Process a single elevator's maintenance records using default values.
-        After the maintenance log is created, an alert is sent to the developer for approval.
+        Process a single elevator's maintenance records with provided details.
         """
         try:
+            elevator_uuid = UUID(str(elevator_data['elevator_id']))
             elevator = get_object_or_404(Elevator, id=elevator_uuid, building=building)
-
+            
             # Create the Ad-Hoc Maintenance Schedule
             ad_hoc_schedule = AdHocMaintenanceSchedule.objects.create(
                 elevator=elevator,
                 technician=building_schedule.technician,
                 maintenance_company=building_schedule.maintenance_company,
                 scheduled_date=building_schedule.scheduled_date,
-                description=(
-                    f"A system-generated maintenance schedule based on the building-level ad-hoc schedule of "
-                    f"{building_schedule.scheduled_date.strftime('%Y-%m-%d')}, intended to {building_schedule.description}."
-                ),
+                description=building_schedule.description,
                 status='completed'
             )
 
-            # Create a default Condition Report
+            # Create Condition Report with provided details
             condition_report = AdHocElevatorConditionReport.objects.create(
                 ad_hoc_schedule=ad_hoc_schedule,
                 technician=building_schedule.technician,
                 date_inspected=timezone.now(),
-                components_checked="Default components check - all components normal.",
-                condition="Good"
+                components_checked=elevator_data['condition_report']['components_checked'],
+                condition=elevator_data['condition_report']['condition']
             )
 
-            # Create a default Maintenance Log
+            # Create Maintenance Log with provided details
             maintenance_log = AdHocMaintenanceLog.objects.create(
                 ad_hoc_schedule=ad_hoc_schedule,
                 technician=building_schedule.technician,
                 condition_report=condition_report,
                 date_completed=timezone.now(),
-                summary_title="Auto-generated maintenance log",
-                description="Maintenance log auto-generated based on building-level schedule completion.",
-                overseen_by="System"
+                summary_title=elevator_data['maintenance_log']['summary_title'],
+                description=elevator_data['maintenance_log']['description'],
+                overseen_by=elevator_data['maintenance_log']['overseen_by']
             )
 
-            # Send Alert to Developer for review
-            # Assumes the building (or building_schedule.building) has a 'developer' attribute.
+            # Send Alert to Developer
             if hasattr(building, 'developer') and building.developer:
                 AlertService.create_alert(
                     alert_type=AlertType.LOG_ADDED,
                     recipient=building.developer,
                     related_object=ad_hoc_schedule,
                     message=(
-                        f"New maintenance log added for elevator {elevator.machine_number} by technician {building_schedule.technician}. "
+                        f"New maintenance log added for elevator {elevator.machine_number} "
+                        f"by technician {building_schedule.technician}. "
+                        f"Maintenance overseen by {maintenance_log.overseen_by}. "
                         f"Please review and approve."
                     )
                 )
@@ -765,9 +800,11 @@ class CompleteBuildingScheduleView(APIView):
                 )
 
             return elevator.user_name, None
+        except ValueError as e:
+            return None, f"Invalid UUID format for elevator: {str(e)}"
         except Exception as e:
-            logger.error(f"Error processing elevator with UUID {elevator_uuid}: {str(e)}")
-            return None, f"Error processing elevator with UUID {elevator_uuid}: {str(e)}"
+            logger.error(f"Error processing elevator {elevator_data['elevator_id']}: {str(e)}")
+            return None, f"Error processing elevator {elevator_data['elevator_id']}: {str(e)}"
 
     @swagger_auto_schema(
         request_body=openapi.Schema(
@@ -775,18 +812,70 @@ class CompleteBuildingScheduleView(APIView):
             properties={
                 'elevators': openapi.Schema(
                     type=openapi.TYPE_ARRAY,
-                    items=openapi.Schema(type=openapi.TYPE_STRING, format="uuid"),
-                    description="List of elevator UUIDs"
+                    items=openapi.Schema(
+                        type=openapi.TYPE_OBJECT,
+                        properties={
+                            'elevator_id': openapi.Schema(
+                                type=openapi.TYPE_STRING,
+                                format='uuid',
+                                description='The UUID of the elevator to be processed'
+                            ),
+                            'condition_report': openapi.Schema(
+                                type=openapi.TYPE_OBJECT,
+                                properties={
+                                    'components_checked': openapi.Schema(
+                                        type=openapi.TYPE_STRING,
+                                        description='List of elevator components inspected'
+                                    ),
+                                    'condition': openapi.Schema(
+                                        type=openapi.TYPE_STRING,
+                                        description='Condition of the components checked'
+                                    )
+                                },
+                                required=['components_checked', 'condition']
+                            ),
+                            'maintenance_log': openapi.Schema(
+                                type=openapi.TYPE_OBJECT,
+                                properties={
+                                    'summary_title': openapi.Schema(
+                                        type=openapi.TYPE_STRING,
+                                        description='Summary title of the maintenance performed'
+                                    ),
+                                    'description': openapi.Schema(
+                                        type=openapi.TYPE_STRING,
+                                        description='Detailed description of the maintenance performed'
+                                    ),
+                                    'overseen_by': openapi.Schema(
+                                        type=openapi.TYPE_STRING,
+                                        description='The technician overseeing the maintenance'
+                                    )
+                                },
+                                required=['summary_title', 'description', 'overseen_by']
+                            )
+                        },
+                        required=['elevator_id', 'condition_report', 'maintenance_log']
+                    )
                 )
             },
+            required=['elevators'],
             example={
                 "elevators": [
-                    "2c26e342-db96-4490-845c-f1b871004b34",
-                    "e8a7d210-3c1e-4c9c-a27b-0d44f0e4b5d2"
+                    {
+                        "elevator_id": "2c26e342-db96-4490-845c-f1b871004b34",
+                        "condition_report": {
+                            "components_checked": "Doors, Motor, Safety Brakes",
+                            "condition": "Doors are slightly misaligned, motor running smoothly, safety brakes functional"
+                        },
+                        "maintenance_log": {
+                            "summary_title": "Door Realignment and Motor Inspection",
+                            "description": "Realigned elevator doors and inspected the motor for wear. Adjustments were made to improve alignment.",
+                            "overseen_by": "John Doe"
+                        }
+                    }
                 ]
             }
         ),
-        operation_description="Complete a building-level maintenance schedule using only elevator UUIDs",
+        operation_description="Complete a building-level maintenance schedule with detailed maintenance information for each elevator",
         responses={
             200: openapi.Response(
                 description="Schedule completion status",
@@ -814,40 +903,32 @@ class CompleteBuildingScheduleView(APIView):
                     }
                 }
             )
-        },
-        manual_parameters=[
-            openapi.Parameter(
-                name='building_schedule_id',
-                in_=openapi.IN_PATH,
-                type=openapi.TYPE_STRING,
-                format=openapi.FORMAT_UUID,
-                required=True,
-                description="UUID of the building schedule"
-            )
-        ]
+        }
     )
     def post(self, request, *args, **kwargs):
-        """Handle POST request to complete building schedule."""
+        """Handle POST request to complete building schedule with detailed maintenance information."""
         # Validate and get building schedule
         building_schedule = self._validate_building_schedule(kwargs['building_schedule_id'])
         if isinstance(building_schedule, Response):
             return building_schedule
 
         building = building_schedule.building
-        elevator_uuid_list = request.data.get("elevators", [])
+        elevator_data = request.data.get("elevators", [])
 
-        # Validate all provided elevator UUIDs
-        failed_elevators, is_valid = self._validate_elevators(elevator_uuid_list, building)
-        if not is_valid:
+        # Validate all provided elevator data
+        validation_errors = self._validate_elevator_data(elevator_data, building)
+        if validation_errors:
             return Response({
-                "message": "Some elevators do not belong to this building or do not exist.",
-                "failed_elevators": failed_elevators
+                "message": "Validation errors occurred.",
+                "errors": validation_errors
             }, status=status.HTTP_400_BAD_REQUEST)
 
         # Process each elevator
         successful_elevators = []
-        for elevator_uuid in elevator_uuid_list:
-            elevator_name, error = self._process_elevator(elevator_uuid, building, building_schedule)
+        failed_elevators = []
+        
+        for elevator_entry in elevator_data:
+            elevator_name, error = self._process_elevator(elevator_entry, building, building_schedule)
             if elevator_name:
                 successful_elevators.append(elevator_name)
             if error:
@@ -858,7 +939,7 @@ class CompleteBuildingScheduleView(APIView):
             building_schedule.status = 'completed'
             building_schedule.save()
 
-        # Prepare the response message
+        # Prepare response message
         if successful_elevators:
             message = (
                 f"{len(successful_elevators)} elevator(s) ({', '.join(successful_elevators)}) were successfully processed. "
@@ -874,7 +955,6 @@ class CompleteBuildingScheduleView(APIView):
             "message": message,
             "failed_elevators": failed_elevators
         }, status=status.HTTP_200_OK)
-
 
 class MaintenanceScheduleDeleteView(APIView):
     """
@@ -1900,53 +1980,57 @@ class FileMaintenanceLogView(APIView):
             'schedule_type': openapi.Schema(
                 type=openapi.TYPE_STRING,
                 enum=['regular', 'adhoc'],
-                description='Type of maintenance schedule'
+                description='Type of maintenance schedule ("regular" or "adhoc")'
             ),
             'condition_report': openapi.Schema(
                 type=openapi.TYPE_OBJECT,
-                required=['maintenance_schedule', 'technician'],
+                description='Condition report - fields vary based on schedule_type',
                 properties={
-                    'maintenance_schedule': openapi.Schema(
-                        type=openapi.TYPE_STRING, 
-                        description='UUID of maintenance schedule'
-                    ),
-                    'technician': openapi.Schema(
-                        type=openapi.TYPE_STRING, 
-                        description='Technician ID'
-                    ),
+                    # Regular maintenance fields
                     'alarm_bell': openapi.Schema(
                         type=openapi.TYPE_STRING,
                         enum=['Functional', 'Intermittent', 'Non-Functional'],
-                        description='Alarm bell condition'
+                        description='[Regular only] Current condition of alarm bell'
                     ),
                     'noise_during_motion': openapi.Schema(
                         type=openapi.TYPE_STRING,
                         enum=['Silent', 'Minimal', 'Moderate', 'Loud', 'Excessive'],
-                        description='Noise during elevator operation'
+                        description='[Regular only] Noise level during elevator operation'
                     ),
                     'cabin_lights': openapi.Schema(
                         type=openapi.TYPE_STRING,
                         enum=['All Working', 'Partial Failure', 'Complete Failure'],
-                        description='Cabin lighting system status'
+                        description='[Regular only] Status of cabin lighting'
                     ),
                     'additional_comments': openapi.Schema(
                         type=openapi.TYPE_STRING,
-                        description='Additional technician observations'
+                        description='[Regular only] Any additional observations'
+                    ),
+                    # Ad-hoc maintenance fields
+                    'components_checked': openapi.Schema(
+                        type=openapi.TYPE_STRING,
+                        description='[Ad-hoc only] List of components that were checked'
+                    ),
+                    'condition': openapi.Schema(
+                        type=openapi.TYPE_STRING,
+                        description='[Ad-hoc only] Detailed condition description of checked components'
                     )
                 }
             ),
             'maintenance_log': openapi.Schema(
                 type=openapi.TYPE_OBJECT,
-                required=['performed_tasks'],
+                description='Maintenance log - fields vary based on schedule_type',
                 properties={
+                    # Regular maintenance fields
                     'performed_tasks': openapi.Schema(
                         type=openapi.TYPE_ARRAY,
+                        description='[Regular only] List of maintenance tasks performed',
                         items=openapi.Schema(
                             type=openapi.TYPE_OBJECT,
                             properties={
                                 'task_name': openapi.Schema(
                                     type=openapi.TYPE_STRING,
-                                    description='Name of maintenance task'
+                                    description='Name of the maintenance task'
                                 ),
                                 'status': openapi.Schema(
                                     type=openapi.TYPE_STRING,
@@ -1955,45 +2039,126 @@ class FileMaintenanceLogView(APIView):
                                 ),
                                 'observations': openapi.Schema(
                                     type=openapi.TYPE_STRING,
-                                    description='Task-specific observations'
+                                    description='Observations during task execution'
                                 )
                             }
-                        ),
-                        description='List of performed maintenance tasks'
+                        )
+                    ),
+                    'check_machine_gear': openapi.Schema(
+                        type=openapi.TYPE_BOOLEAN,
+                        description='[Regular only] Machine gear inspection completed'
+                    ),
+                    'check_machine_brake': openapi.Schema(
+                        type=openapi.TYPE_BOOLEAN,
+                        description='[Regular only] Machine brake inspection completed'
+                    ),
+                    'check_controller_connections': openapi.Schema(
+                        type=openapi.TYPE_BOOLEAN,
+                        description='[Regular only] Controller connections checked'
+                    ),
+                    'blow_dust_from_controller': openapi.Schema(
+                        type=openapi.TYPE_BOOLEAN,
+                        description='[Regular only] Controller dust removal completed'
+                    ),
+                    'clean_machine_room': openapi.Schema(
+                        type=openapi.TYPE_BOOLEAN,
+                        description='[Regular only] Machine room cleaning completed'
+                    ),
+                    'clean_guide_rails': openapi.Schema(
+                        type=openapi.TYPE_BOOLEAN,
+                        description='[Regular only] Guide rails cleaning completed'
+                    ),
+                    'observe_operation': openapi.Schema(
+                        type=openapi.TYPE_BOOLEAN,
+                        description='[Regular only] Operation observation completed'
+                    ),
+                    # Ad-hoc maintenance fields
+                    'summary_title': openapi.Schema(
+                        type=openapi.TYPE_STRING,
+                        description='[Ad-hoc only] Brief title describing the maintenance'
                     ),
                     'description': openapi.Schema(
                         type=openapi.TYPE_STRING,
-                        description='Comprehensive maintenance description'
+                        description='Detailed description of maintenance performed'
                     ),
                     'overseen_by': openapi.Schema(
                         type=openapi.TYPE_STRING,
-                        description='Supervisor overseeing maintenance'
-                    ),
-                    'approved_by': openapi.Schema(
-                        type=openapi.TYPE_STRING,
-                        description='Maintenance approval authority'
-                    ),
-                    # Checklist fields
-                    'check_machine_gear': openapi.Schema(type=openapi.TYPE_BOOLEAN, description="Checked machine gear"),
-                    'check_machine_brake': openapi.Schema(type=openapi.TYPE_BOOLEAN, description="Checked machine brake"),
-                    'check_controller_connections': openapi.Schema(type=openapi.TYPE_BOOLEAN, description="Checked controller connections"),
-                    'blow_dust_from_controller': openapi.Schema(type=openapi.TYPE_BOOLEAN, description="Blown dust from controller"),
-                    'clean_machine_room': openapi.Schema(type=openapi.TYPE_BOOLEAN, description="Cleaned machine room"),
-                    'clean_guide_rails': openapi.Schema(type=openapi.TYPE_BOOLEAN, description="Cleaned guide rails"),
-                    'observe_operation': openapi.Schema(type=openapi.TYPE_BOOLEAN, description="Observed operation"),
+                        description='Name of person overseeing the maintenance'
+                    )
                 }
             )
         }
     )
 
+    example_regular = {
+        "schedule_type": "regular",
+        "condition_report": {
+            "alarm_bell": "Functional",
+            "noise_during_motion": "Minimal",
+            "cabin_lights": "All Working",
+            "additional_comments": "All systems operating normally"
+        },
+        "maintenance_log": {
+            "performed_tasks": [{
+                "task_name": "Brake inspection",
+                "status": "completed",
+                "observations": "Brakes in good condition"
+            }],
+            "description": "Regular maintenance completed",
+            "overseen_by": "John Smith",
+            "check_machine_gear": True,
+            "check_machine_brake": True,
+            "check_controller_connections": True,
+            "blow_dust_from_controller": True,
+            "clean_machine_room": True,
+            "clean_guide_rails": True,
+            "observe_operation": True
+        }
+    }
+
+    example_adhoc = {
+        "schedule_type": "adhoc",
+        "condition_report": {
+            "components_checked": "Doors, Motor, Safety Brakes",
+            "condition": "Doors are slightly misaligned, motor running smoothly, safety brakes functional"
+        },
+        "maintenance_log": {
+            "summary_title": "Door Realignment and Motor Inspection",
+            "description": "Realigned elevator doors and inspected the motor for wear. Adjustments made to improve alignment.",
+            "overseen_by": "John Smith"
+        }
+    }
+
     @swagger_auto_schema(
-        operation_description="File a comprehensive maintenance log with condition report",
+        operation_description="""
+File a maintenance log with condition report. Supports both regular and ad-hoc maintenance.
+
+For regular maintenance (schedule_type: "regular"):
+- Condition report requires: alarm_bell, noise_during_motion, cabin_lights
+- Maintenance log requires: performed_tasks and all checklist fields
+
+For ad-hoc maintenance (schedule_type: "adhoc"):
+- Condition report requires: components_checked, condition
+- Maintenance log requires: summary_title, description, overseen_by
+""",
         request_body=maintenance_request_schema,
         responses={
             200: openapi.Response(description="Maintenance log successfully created"),
             400: openapi.Response(description="Validation error"),
             404: openapi.Response(description="Schedule not found")
-        }
+        },
+        examples={
+            'regular': {
+                'summary': 'Regular Maintenance Example',
+                'value': example_regular
+            },
+            'adhoc': {
+                'summary': 'Ad-hoc Maintenance Example',
+                'value': example_adhoc
+            }
+        },
+        operation_id='file_maintenance_log',
+        tags=['Maintenance Logs']
     )
     def post(self, request, schedule_id):
         try:
@@ -2026,6 +2191,7 @@ class FileMaintenanceLogView(APIView):
         # Fetch and validate schedule
         maintenance_schedule = get_object_or_404(ScheduleModel, id=schedule_uuid)
 
+        # Validate schedule status
         if not maintenance_schedule.technician:
             return Response({"detail": "No technician assigned."}, status=status.HTTP_400_BAD_REQUEST)
         if not maintenance_schedule.maintenance_company:
@@ -2038,6 +2204,7 @@ class FileMaintenanceLogView(APIView):
         if not condition_report_data:
             return Response({"detail": "Condition report required."}, status=status.HTTP_400_BAD_REQUEST)
 
+        # Add required fields to condition report data
         condition_report_data.update({
             'technician': maintenance_schedule.technician.id,
             schedule_field: maintenance_schedule.id
@@ -2053,7 +2220,7 @@ class FileMaintenanceLogView(APIView):
         if not maintenance_log_data:
             return Response({"detail": "Maintenance log data required."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Validate required fields based on schedule type
+        # Validate maintenance log data based on schedule type
         if schedule_type == 'regular':
             checklist_fields = [
                 'check_machine_gear', 'check_machine_brake', 'check_controller_connections',
@@ -2065,12 +2232,16 @@ class FileMaintenanceLogView(APIView):
                     {"detail": f"Missing required fields: {', '.join(missing_fields)}"},
                     status=status.HTTP_400_BAD_REQUEST
                 )
-        elif schedule_type == 'adhoc' and 'summary_title' not in maintenance_log_data:
-            return Response(
-                {"detail": "Summary title required for ad-hoc maintenance."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        elif schedule_type == 'adhoc':
+            required_fields = ['summary_title', 'description', 'overseen_by']
+            missing_fields = [field for field in required_fields if field not in maintenance_log_data]
+            if missing_fields:
+                return Response(
+                    {"detail": f"Missing required fields: {', '.join(missing_fields)}"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
+        # Add common fields to maintenance log data
         maintenance_log_data.update({
             'technician': maintenance_schedule.technician.id,
             'condition_report': condition_report.id,
@@ -2078,52 +2249,53 @@ class FileMaintenanceLogView(APIView):
             'date_completed': timezone.now()
         })
 
-        # Create maintenance log
         maintenance_log_serializer = MaintenanceLogSerializer(data=maintenance_log_data)
         if not maintenance_log_serializer.is_valid():
             return Response({"detail": str(maintenance_log_serializer.errors)}, status=status.HTTP_400_BAD_REQUEST)
         maintenance_log = maintenance_log_serializer.save()
 
-        # Update schedule status based on scheduled date
-        if maintenance_schedule.scheduled_date < timezone.now():
-            maintenance_schedule.status = 'overdue'
-        else:
-            maintenance_schedule.status = 'completed'
+        # Update schedule status
+        maintenance_schedule.status = 'completed'
         maintenance_schedule.save()
 
-        # Create alert for developer approval
+        # Create alerts
         try:
             developer = maintenance_schedule.elevator.building.developer
             elevator = maintenance_schedule.elevator
             
-            # Create alert for developer approval
+            # Alert for developer
             AlertService.create_alert(
                 alert_type=AlertType.MAINTENANCE_APPROVAL_NEEDED,
                 recipient=developer,
                 related_object=maintenance_schedule,
                 message=(
-                    f"Maintenance completed for elevator {elevator.machine_number} "
-                    f"in building {elevator.building.name}. Please review and approve "
-                    f"the maintenance log."
+                    f"{'Ad-hoc' if schedule_type == 'adhoc' else 'Regular'} maintenance completed for "
+                    f"elevator {elevator.machine_number} in building {elevator.building.name}. "
+                    f"Please review and approve the maintenance log."
                 )
             )
 
-            # Create notification alert for maintenance company
+            # Alert for maintenance company
             AlertService.create_alert(
                 alert_type=AlertType.LOG_ADDED,
                 recipient=maintenance_schedule.maintenance_company,
                 related_object=maintenance_schedule,
                 message=(
-                    f"Maintenance log submitted for elevator {elevator.machine_number} "
-                    f"in building {elevator.building.name}. Awaiting developer approval."
+                    f"{'Ad-hoc' if schedule_type == 'adhoc' else 'Regular'} maintenance log submitted for "
+                    f"elevator {elevator.machine_number} in building {elevator.building.name}. "
+                    f"Awaiting developer approval."
                 )
             )
 
         except Exception as e:
-            # Log the error but don't fail the request
-            logger.error(f"Failed to create maintenance approval alert: {str(e)}")
+            logger.error(f"Failed to create maintenance approval alerts: {str(e)}")
 
         return Response(
-            {"detail": f"{schedule_type.capitalize()} maintenance completed successfully and sent for approval."},
+            {
+                "detail": (
+                    f"{'Ad-hoc' if schedule_type == 'adhoc' else 'Regular'} maintenance "
+                    f"completed successfully and sent for approval."
+                )
+            },
             status=status.HTTP_200_OK
-        ) 
+        )

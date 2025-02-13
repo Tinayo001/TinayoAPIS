@@ -48,10 +48,39 @@ class CompleteBuildingScheduleViewTests(APITestCase):
         # Updated URL path construction
         self.url = f'/api/jobs/buildings/{self.building_schedule.id}/complete-schedule/'
 
+        # Create valid test data
+        self.valid_elevator_data = {
+            "components_checked": "Doors, Motor, Safety Brakes",
+            "condition": "Good working condition",
+            "summary_title": "Regular maintenance",
+            "description": "Completed all checks",
+            "overseen_by": "John Supervisor"
+        }
+
+    def _create_elevator_payload(self, elevator_id, include_all_fields=True):
+        """Helper method to create payload for a single elevator"""
+        if include_all_fields:
+            return {
+                "elevator_id": str(elevator_id),
+                "condition_report": {
+                    "components_checked": self.valid_elevator_data["components_checked"],
+                    "condition": self.valid_elevator_data["condition"]
+                },
+                "maintenance_log": {
+                    "summary_title": self.valid_elevator_data["summary_title"],
+                    "description": self.valid_elevator_data["description"],
+                    "overseen_by": self.valid_elevator_data["overseen_by"]
+                }
+            }
+        return {"elevator_id": str(elevator_id)}
+
     def test_successful_completion(self):
         """Test successful completion of building schedule with valid data"""
         data = {
-            "elevators": [str(elevator.id) for elevator in self.elevators]
+            "elevators": [
+                self._create_elevator_payload(elevator.id)
+                for elevator in self.elevators
+            ]
         }
 
         response = self.client.post(self.url, data, format='json')
@@ -63,36 +92,35 @@ class CompleteBuildingScheduleViewTests(APITestCase):
         # Verify creation of related objects
         for elevator in self.elevators:
             # Check AdHocMaintenanceSchedule was created
-            self.assertTrue(
-                AdHocMaintenanceSchedule.objects.filter(
-                    elevator=elevator,
-                    status='completed'
-                ).exists()
-            )
-            
             adhoc_schedule = AdHocMaintenanceSchedule.objects.get(
                 elevator=elevator,
                 status='completed'
             )
             
-            # Check condition report was created
-            self.assertTrue(
-                AdHocElevatorConditionReport.objects.filter(
-                    ad_hoc_schedule=adhoc_schedule
-                ).exists()
+            # Check condition report was created with correct values
+            condition_report = AdHocElevatorConditionReport.objects.get(
+                ad_hoc_schedule=adhoc_schedule
             )
+            self.assertEqual(condition_report.components_checked, self.valid_elevator_data["components_checked"])
+            self.assertEqual(condition_report.condition, self.valid_elevator_data["condition"])
             
-            # Check maintenance log was created
-            self.assertTrue(
-                AdHocMaintenanceLog.objects.filter(
-                    ad_hoc_schedule=adhoc_schedule
-                ).exists()
-            ) 
+            # Check maintenance log was created with correct values
+            maintenance_log = AdHocMaintenanceLog.objects.get(
+                ad_hoc_schedule=adhoc_schedule
+            )
+            self.assertEqual(maintenance_log.summary_title, self.valid_elevator_data["summary_title"])
+            self.assertEqual(maintenance_log.description, self.valid_elevator_data["description"])
+            self.assertEqual(maintenance_log.overseen_by, self.valid_elevator_data["overseen_by"])
 
     def test_nonexistent_schedule(self):
         """Test with non-existent building schedule ID"""
         nonexistent_url = f'/api/jobs/buildings/{uuid4()}/complete-schedule/'
-        response = self.client.post(nonexistent_url, {}, format='json')
+        data = {
+            "elevators": [
+                self._create_elevator_payload(self.elevators[0].id)
+            ]
+        }
+        response = self.client.post(nonexistent_url, data, format='json')
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_already_completed_schedule(self):
@@ -102,23 +130,13 @@ class CompleteBuildingScheduleViewTests(APITestCase):
         
         data = {
             "elevators": [
-                {
-                    "elevator_id": str(self.elevators[0].id),
-                    "condition_report": {
-                        "components_checked": "All major components",
-                        "condition": "Good working condition"
-                    },
-                    "maintenance_log": {
-                        "summary_title": "Regular maintenance",
-                        "description": "Completed all checks",
-                        "overseen_by": "John Supervisor"
-                    }
-                }
+                self._create_elevator_payload(self.elevators[0].id)
             ]
         }
         
         response = self.client.post(self.url, data, format='json')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("already been completed", response.data["message"])
 
     def test_elevator_not_in_building(self):
         """Test with elevator that doesn't belong to the building"""
@@ -127,16 +145,51 @@ class CompleteBuildingScheduleViewTests(APITestCase):
         
         data = {
             "elevators": [
+                self._create_elevator_payload(other_elevator.id)
+            ]
+        }
+        
+        response = self.client.post(self.url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('errors', response.data)
+
+    def test_missing_required_fields(self):
+        """Test with missing required fields in the request"""
+        data = {
+            "elevators": [
                 {
-                    "elevator_id": str(other_elevator.id),
+                    "elevator_id": str(self.elevators[0].id),
                     "condition_report": {
-                        "components_checked": "All major components",
-                        "condition": "Good working condition"
+                        "components_checked": self.valid_elevator_data["components_checked"]
+                        # Missing 'condition' field
                     },
                     "maintenance_log": {
-                        "summary_title": "Regular maintenance",
-                        "description": "Completed all checks",
-                        "overseen_by": "John Supervisor"
+                        "summary_title": self.valid_elevator_data["summary_title"],
+                        "description": self.valid_elevator_data["description"]
+                        # Missing 'overseen_by' field
+                    }
+                }
+            ]
+        }
+    
+        response = self.client.post(self.url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('errors', response.data)
+
+    def test_invalid_uuid_format(self):
+        """Test with invalid UUID format for elevator ID"""
+        data = {
+            "elevators": [
+                {
+                    "elevator_id": "invalid-uuid",
+                    "condition_report": {
+                        "components_checked": self.valid_elevator_data["components_checked"],
+                        "condition": self.valid_elevator_data["condition"]
+                    },
+                    "maintenance_log": {
+                        "summary_title": self.valid_elevator_data["summary_title"],
+                        "description": self.valid_elevator_data["description"],
+                        "overseen_by": self.valid_elevator_data["overseen_by"]
                     }
                 }
             ]
@@ -144,40 +197,7 @@ class CompleteBuildingScheduleViewTests(APITestCase):
         
         response = self.client.post(self.url, data, format='json')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn('failed_elevators', response.data)
-
-    def test_missing_required_data(self):
-        """Test with missing required data in the request"""
-        data = {
-            "elevators": [str(self.elevators[0].id)]  # Just send the elevator UUID
-        }
-    
-        response = self.client.post(self.url, data, format='json')
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-    
-        # Verify that default values were used
-        adhoc_schedule = AdHocMaintenanceSchedule.objects.get(
-            elevator=self.elevators[0],
-            status='completed'
-        )
-    
-        # Verify condition report was created with default values
-        condition_report = AdHocElevatorConditionReport.objects.get(
-            ad_hoc_schedule=adhoc_schedule
-        )
-        self.assertEqual(condition_report.components_checked, "Default components check - all components normal.")
-        self.assertEqual(condition_report.condition, "Good")
-    
-        # Verify maintenance log was created with default values
-        maintenance_log = AdHocMaintenanceLog.objects.get(
-            ad_hoc_schedule=adhoc_schedule
-        )
-        self.assertEqual(maintenance_log.summary_title, "Auto-generated maintenance log")
-        self.assertEqual(
-            maintenance_log.description, 
-            "Maintenance log auto-generated based on building-level schedule completion."
-        )
-        self.assertEqual(maintenance_log.overseen_by, "System")
+        self.assertIn('errors', response.data)
     
     def test_partial_success(self):
         """Test scenario where some elevators succeed and others fail"""
@@ -186,37 +206,47 @@ class CompleteBuildingScheduleViewTests(APITestCase):
         
         data = {
             "elevators": [
-                {
-                    "elevator_id": str(self.elevators[0].id),
-                    "condition_report": {
-                        "components_checked": "All major components",
-                        "condition": "Good working condition"
-                    },
-                    "maintenance_log": {
-                        "summary_title": "Regular maintenance",
-                        "description": "Completed all checks",
-                        "overseen_by": "John Supervisor"
-                    }
-                },
-                {
-                    "elevator_id": str(other_elevator.id),  # This should fail
-                    "condition_report": {
-                        "components_checked": "All major components",
-                        "condition": "Good working condition"
-                    },
-                    "maintenance_log": {
-                        "summary_title": "Regular maintenance",
-                        "description": "Completed all checks",
-                        "overseen_by": "John Supervisor"
-                    }
-                }
+                self._create_elevator_payload(self.elevators[0].id),
+                self._create_elevator_payload(other_elevator.id)
             ]
         }
         
         response = self.client.post(self.url, data, format='json')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn('failed_elevators', response.data)
+        self.assertIn('errors', response.data)
         
         # Verify the building schedule wasn't marked as completed
         self.building_schedule.refresh_from_db()
         self.assertEqual(self.building_schedule.status, 'scheduled')
+
+    def test_empty_elevator_list(self):
+        """Test with empty elevator list"""
+        data = {"elevators": []}
+    
+        response = self.client.post(self.url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('errors', response.data)
+        self.assertTrue(any('No elevators provided' in error for error in response.data['errors']))
+     
+
+    def test_duplicate_elevator_ids(self):
+        """Test with duplicate elevator IDs in the request"""
+        data = {
+            "elevators": [
+                self._create_elevator_payload(self.elevators[0].id),
+                self._create_elevator_payload(self.elevators[0].id)
+            ]
+        }
+    
+        response = self.client.post(self.url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('errors', response.data)
+        self.assertTrue(any('Duplicate elevator ID' in error for error in response.data['errors']))
+    
+        # Verify no records were created due to the duplicate ID error
+        self.assertEqual(
+            AdHocMaintenanceSchedule.objects.filter(
+                elevator=self.elevators[0]
+            ).count(),
+            0
+        ) 

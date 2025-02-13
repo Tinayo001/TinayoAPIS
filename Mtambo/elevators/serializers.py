@@ -3,7 +3,7 @@ from rest_framework import serializers
 from .models import Elevator
 from buildings.models import Building
 from django.shortcuts import get_object_or_404
-
+from .models import ElevatorIssueLog
 from technicians.models import TechnicianProfile 
 
 class ElevatorSerializer(serializers.ModelSerializer):
@@ -173,3 +173,27 @@ class ElevatorCreateSerializer(serializers.Serializer):
             **validated_data
         )
         return elevator
+
+class ElevatorIssueLogSerializer(serializers.ModelSerializer):
+    building_name = serializers.CharField(source='building.name', read_only=True)
+    elevator_username = serializers.CharField(source='elevator.user_name', read_only=True)
+    elevator_machine_number = serializers.CharField(source='elevator.machine_number', read_only=True)
+    issue_id = serializers.IntegerField(source='id', read_only=True)
+
+    class Meta:
+        model = ElevatorIssueLog
+        fields = ['issue_id', 'elevator', 'developer', 'building', 'reported_date', 'issue_description', 'building_name', 'elevator_username', 'elevator_machine_number']
+
+    def create(self, validated_data):
+        # Automatically fill elevator, developer, and building from the elevator instance
+        elevator = validated_data['elevator']
+        developer = elevator.developer  # Assuming the elevator has a linked developer
+        building = elevator.building  # Assuming the elevator is linked to a building
+
+        issue_log = ElevatorIssueLog.objects.create(
+            elevator=elevator,
+            developer=developer,
+            building=building,
+            issue_description=validated_data['issue_description']
+        )
+        return issue_log

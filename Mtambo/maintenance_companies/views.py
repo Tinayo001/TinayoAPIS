@@ -44,7 +44,7 @@ from developers.serializers import DeveloperDetailSerializer
 from buildings.serializers import BuildingSerializer
 from elevators.serializers import ElevatorSerializer, ElevatorReadSerializer, ElevatorCreateSerializer
 from alerts.services import AlertService
-from alerts.models import AlertType
+from alerts.models import AlertType, Alert
 from typing import Dict, List, Tuple, Optional, Any
 from django.db import transaction
 
@@ -323,6 +323,14 @@ class RemoveTechnicianFromCompanyView(APIView):
             technician.maintenance_company = None
             technician.save(update_fields=['maintenance_company'])
             
+            # Send an alert to the technician that they have been removed
+            AlertService.create_alert(
+                alert_type=AlertType.TECHNICIAN_UNLINK,
+                recipient=technician,
+                related_object=maintenance_company,
+                message=f"You have been removed from the maintenance company {maintenance_company.company_name}"
+            )
+            
             return Response(
                 {"message": "Technician successfully removed from company"},
                 status=status.HTTP_200_OK
@@ -340,6 +348,7 @@ class RemoveTechnicianFromCompanyView(APIView):
                 {"error": "An unexpected error occurred"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
 class AddBuildingView(APIView):
     permission_classes = [IsAuthenticated]
     authentication_classes = [Custom401SessionAuthentication, Custom401JWTAuthentication]
@@ -715,136 +724,110 @@ class DevelopersUnderCompanyView(APIView):
                 {"error": str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-
 class DeveloperDetailUnderCompanyView(APIView):
     permission_classes = [AllowAny]  # Adjust this based on your permission needs
 
     def get(self, request, company_id, developer_id):
         try:
-            # Step 1: Retrieve the maintenance company by its ID
+            # Try to convert company_id and developer_id to UUIDs
+            company_id = uuid.UUID(company_id)  # This will raise ValueError if the format is wrong
+            developer_id = uuid.UUID(developer_id)
+        except ValueError:
+            return JsonResponse(
+                {"error": "Invalid UUID format."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            # Retrieve the maintenance company by its ID
             company = MaintenanceCompanyProfile.objects.get(id=company_id)
-            
-            # Step 2: Retrieve the elevators linked to the given maintenance company
+            # Retrieve the elevators linked to the given maintenance company
             elevators = Elevator.objects.filter(maintenance_company=company)
-            
-            # Step 3: Get the buildings associated with these elevators
+            # Get the buildings associated with these elevators
             buildings = set([elevator.building for elevator in elevators])
             
-            # Step 4: Check if the developer is linked to any of these buildings
+            # Check if the developer is linked to any of these buildings
             developer = DeveloperProfile.objects.get(id=developer_id)
             developer_buildings = set([building for building in buildings if building.developer == developer])
             
             if not developer_buildings:
-                # If no buildings are found for the specified developer, return an error
                 return Response(
                     {"error": "Developer not found or not linked to any buildings under the specified maintenance company."},
                     status=status.HTTP_404_NOT_FOUND
                 )
 
-            # Step 5: Serialize the developer data
+            # Serialize the developer data
             serialized_data = DeveloperDetailSerializer(developer)
 
-            # Step 6: Return the serialized developer data
+            # Return the serialized developer data
             return Response(serialized_data.data, status=status.HTTP_200_OK)
 
         except MaintenanceCompanyProfile.DoesNotExist:
-            # If the maintenance company doesn't exist
             return Response(
                 {"error": "Maintenance company not found."},
                 status=status.HTTP_404_NOT_FOUND
             )
         except DeveloperProfile.DoesNotExist:
-            # If the developer doesn't exist
             return Response(
                 {"error": "Developer not found."},
                 status=status.HTTP_404_NOT_FOUND
             )
         except Exception as e:
-            # Log the exception details for debugging
             logger.error(f"Unexpected error: {str(e)}")
-            # Handle any unexpected errors
             return Response(
                 {"error": "An unexpected error occurred. Please try again later."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+
 class BuildingsUnderDeveloperView(APIView):
     permission_classes = [AllowAny]
     serializer_class = BuildingSerializer
 
-    def validate_uuid(self, uuid_string, param_name):
-        """Validate UUID format"""
-        if not isinstance(uuid_string, str):
-            raise ValidationError(f"Invalid UUID format for {param_name}")
-        try:
-            uuid.UUID(uuid_string)
-            return uuid_string
-        except (ValueError, AttributeError, TypeError):
-            raise ValidationError(f"Invalid UUID format for {param_name}")
-
     def get_maintenance_company(self, company_id):
         """Get maintenance company or raise 404"""
         try:
-            logger.info(f"Retrieving maintenance company with ID: {company_id}")
             company = MaintenanceCompanyProfile.objects.get(id=company_id)
-            logger.info(f"Found company: {company}")
             return company
         except MaintenanceCompanyProfile.DoesNotExist:
-            logger.error(f"Maintenance company not found for ID: {company_id}")
             raise NotFound("Maintenance company not found.")
 
     def get_developer(self, developer_id):
         """Get developer or raise 404"""
         try:
-            logger.info(f"Retrieving developer with ID: {developer_id}")
             developer = DeveloperProfile.objects.get(id=developer_id)
-            logger.info(f"Found developer: {developer}")
             return developer
         except DeveloperProfile.DoesNotExist:
-            logger.error(f"Developer not found for ID: {developer_id}")
             raise NotFound("Developer not found.")
 
     def get_buildings(self, developer, company):
         """Get buildings for developer and company"""
-        logger.info(f"Retrieving buildings for developer {developer.id} and company {company.id}")
         elevators = Elevator.objects.filter(
             building__developer=developer,
             maintenance_company=company
-        )
+        ).select_related('building')  # Optimize with select_related to reduce queries
         
         if not elevators.exists():
-            logger.warning("No buildings found")
-            # Return consistent message format
             return Response(
-                {"message": "No buildings found."},
+                {"message": "No buildings found for this developer and maintenance company."},
                 status=status.HTTP_404_NOT_FOUND
             )
             
         buildings = list({elevator.building for elevator in elevators})
-        logger.info(f"Found {len(buildings)} buildings")
         return buildings
 
     def get(self, request, company_id, developer_id):
         """Get buildings associated with a developer and maintenance company"""
         try:
-            # Validate UUIDs first
-            try:
-                valid_company_id = self.validate_uuid(company_id, "company_id")
-                valid_developer_id = self.validate_uuid(developer_id, "developer_id")
-            except ValidationError as e:
-                return Response(
-                    {"error": str(e)},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
             # Get required objects
-            company = self.get_maintenance_company(valid_company_id)
-            developer = self.get_developer(valid_developer_id)
+            company = self.get_maintenance_company(company_id)
+            developer = self.get_developer(developer_id)
             
-            # Get buildings - this might return a Response for no buildings
+            # Get buildings
             buildings = self.get_buildings(developer, company)
             if isinstance(buildings, Response):
                 return buildings
-
+                
             # Serialize and return data
             serialized_data = self.serializer_class(buildings, many=True)
             return Response(serialized_data.data)
@@ -855,11 +838,11 @@ class BuildingsUnderDeveloperView(APIView):
                 status=status.HTTP_404_NOT_FOUND
             )
         except Exception as e:
-            logger.error(f"Unexpected error: {str(e)}")
             return Response(
                 {"error": "An unexpected error occurred"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
 class ElevatorsUnderCompanyView(APIView):
     permission_classes = [AllowAny]  # Adjust as necessary for authentication and authorization
 
@@ -1287,7 +1270,6 @@ class TechnicianDetailForCompanyView(APIView):
             )
         return super().handle_exception(exc)
 
-
 class UpdateTechnicianOnBuildingsView(APIView):
     permission_classes = [AllowAny]  # Adjust based on your needs (authentication, etc.)
 
@@ -1372,8 +1354,54 @@ class UpdateTechnicianOnBuildingsView(APIView):
             self.validate_uuid(technician_id)
             technician = TechnicianProfile.objects.get(id=technician_id, maintenance_company=company)
             
+            # Get the previous technician for alert purposes (if any)
+            previous_technician = None
+            if elevators.first().technician:
+                previous_technician = elevators.first().technician
+
+            # Get technician's name
+            technician_name = f"{technician.user.first_name} {technician.user.last_name}".strip()
+            if not technician_name:
+                technician_name = technician.user.username
+
             # Step 5: Update the technician for all elevators in the building
-            elevators.update(technician=technician)
+            with transaction.atomic():
+                # Update elevators
+                elevators.update(technician=technician)
+                
+                # Create alert for the new technician
+                AlertService.create_alert(
+                    alert_type=AlertType.TECHNICIAN_UPDATED_FOR_BUILDING,
+                    recipient=technician,
+                    related_object=building,
+                    message=(
+                        f"You have been assigned to maintain all elevators in "
+                        f"building {building.name}"
+                    )
+                )
+
+                # Create alert for the previous technician if exists
+                if previous_technician and previous_technician != technician:
+                    AlertService.create_alert(
+                        alert_type=AlertType.TECHNICIAN_UPDATED_FOR_BUILDING,
+                        recipient=previous_technician,
+                        related_object=building,
+                        message=(
+                            f"You have been unassigned from maintaining elevators in "
+                            f"building {building.name}"
+                        )
+                    )
+
+                # Create alert for the maintenance company
+                AlertService.create_alert(
+                    alert_type=AlertType.TECHNICIAN_UPDATED_FOR_BUILDING,
+                    recipient=company,
+                    related_object=building,
+                    message=(
+                        f"Technician {technician_name} has been assigned "
+                        f"to all elevators in building {building.name}"
+                    )
+                )
 
             # Step 6: Serialize and return the updated elevator data
             updated_elevators = Elevator.objects.filter(building=building, maintenance_company=company)
@@ -1382,7 +1410,7 @@ class UpdateTechnicianOnBuildingsView(APIView):
                 "user_name": elevator.user_name,
                 "technician": {
                     "id": str(technician.id),
-                    "name": f"{technician.user.first_name} {technician.user.last_name}"
+                    "name": technician_name
                 },
                 "capacity": elevator.capacity,
                 "building": {
@@ -1416,66 +1444,111 @@ class UpdateTechnicianOnElevatorView(APIView):
     permission_classes = [AllowAny]
 
     @swagger_auto_schema(
-       operation_description="Update technician for a specific elevator",
-       manual_parameters=[
-           openapi.Parameter(
-               'company_uuid',
-               openapi.IN_PATH,
-               description="UUID of the maintenance company",
-               type=openapi.TYPE_STRING,
-               format=openapi.FORMAT_UUID,
-               required=True
-           ),
-           openapi.Parameter(
-               'elevator_uuid', 
-               openapi.IN_PATH,
-               description="UUID of the elevator",
-               type=openapi.TYPE_STRING,
-               format=openapi.FORMAT_UUID,
-               required=True
-           )
-       ],
-       request_body=openapi.Schema(
-           type=openapi.TYPE_OBJECT,
-           required=['technician_id'],
-           properties={
-               'technician_id': openapi.Schema(
-                   type=openapi.TYPE_STRING, 
-                   format=openapi.FORMAT_UUID,
-                   description="UUID of the technician to assign"
-               )
-           }
-       ),
-       responses={
-           200: ElevatorSerializer,
-           400: "Bad Request - Technician ID is required",
-           404: "Not Found - Company, Elevator or Technician not found"
-       }
-   )
+        operation_description="Update technician for a specific elevator",
+        manual_parameters=[
+            openapi.Parameter(
+                'company_uuid',
+                openapi.IN_PATH,
+                description="UUID of the maintenance company",
+                type=openapi.TYPE_STRING,
+                format=openapi.FORMAT_UUID,
+                required=True
+            ),
+            openapi.Parameter(
+                'elevator_uuid', 
+                openapi.IN_PATH,
+                description="UUID of the elevator",
+                type=openapi.TYPE_STRING,
+                format=openapi.FORMAT_UUID,
+                required=True
+            )
+        ],
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=['technician_id'],
+            properties={
+                'technician_id': openapi.Schema(
+                    type=openapi.TYPE_STRING, 
+                    format=openapi.FORMAT_UUID,
+                    description="UUID of the technician to assign"
+                )
+            }
+        ),
+        responses={
+            200: ElevatorSerializer,
+            400: "Bad Request - Technician ID is required",
+            404: "Not Found - Company, Elevator or Technician not found"
+        }
+    )
     def put(self, request, company_uuid, elevator_uuid):
-        # Retrieve the maintenance company by UUID
-        company = get_object_or_404(MaintenanceCompanyProfile, id=company_uuid)
-
-        # Retrieve the elevator by UUID, ensuring it belongs to the specified company
-        elevator = get_object_or_404(Elevator, id=elevator_uuid, maintenance_company=company)
-        
-        # Get technician ID from the request body
+        # Get technician ID from request body first
         technician_id = request.data.get("technician_id")
         if not technician_id:
-            return Response({"error": "Technician ID is required."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "Technician ID is required."}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
-        # Retrieve the technician by UUID, ensuring they belong to the specified company
-        technician = get_object_or_404(TechnicianProfile, id=technician_id, maintenance_company=company)
-
-        # Update the elevator with the technician
-        elevator.technician = technician
-        elevator.save()
-
-        # Serialize the updated elevator object
-        serializer = ElevatorSerializer(elevator)
-
-        # Return the updated elevator data in the response
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        try:
+            # Retrieve the maintenance company by UUID
+            company = get_object_or_404(MaintenanceCompanyProfile, id=company_uuid)
+            
+            # Retrieve the elevator by UUID
+            elevator = get_object_or_404(Elevator, id=elevator_uuid, maintenance_company=company)
+            
+            # Retrieve the technician
+            technician = get_object_or_404(TechnicianProfile, id=technician_id, maintenance_company=company)
+            
+            # Store old technician for comparison
+            old_technician = elevator.technician
+            
+            # Update the elevator with the technician
+            elevator.technician = technician
+            elevator.save()
+            
+            # Get full names for logging
+            old_tech_name = f"{old_technician.user.first_name} {old_technician.user.last_name}" if old_technician else "None"
+            new_tech_name = f"{technician.user.first_name} {technician.user.last_name}"
+            
+            # Log the technician change
+            logger.info(
+                f"Technician changed from {old_tech_name} "
+                f"to {new_tech_name} for elevator {elevator.machine_number}"
+            )
+            
+            try:
+                # Create an alert for the new technician
+                alert = AlertService.create_alert(
+                    alert_type=AlertType.ELEVATOR_ASSIGNED,
+                    recipient=technician,
+                    related_object=elevator,
+                    message=f"Elevator {elevator.machine_number} in building {elevator.building.name} has been assigned to you"
+                )
+                logger.info(f"Alert created successfully with ID: {alert.id} for technician {new_tech_name}")
+                
+                # Verify alert was created
+                if Alert.objects.filter(id=alert.id).exists():
+                    logger.info(f"Alert {alert.id} verified in database")
+                else:
+                    logger.error(f"Alert {alert.id} not found in database after creation")
+                    
+            except Exception as alert_error:
+                logger.error(f"Failed to create alert: {str(alert_error)}", exc_info=True)
+                # Continue with the response even if alert creation fails
+            
+            # Serialize and return the updated elevator data
+            serializer = ElevatorSerializer(elevator)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+            
+        except Http404:
+            # Re-raise Http404 exceptions to maintain proper status codes
+            raise
+        except Exception as e:
+            logger.error(f"Error in UpdateTechnicianOnElevatorView: {str(e)}", exc_info=True)
+            return Response(
+                {"error": "Failed to update technician assignment."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 class RemoveMaintenanceFromBuildingElevatorsView(APIView):
     permission_classes = [AllowAny]

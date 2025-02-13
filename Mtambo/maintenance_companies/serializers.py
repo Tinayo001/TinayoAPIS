@@ -60,3 +60,8 @@ class AddBuildingSerializer(serializers.Serializer):
                 raise serializers.ValidationError({"capacity": "A valid integer is required."})
         
         return value
+
+class MaintenanceListSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MaintenanceCompanyProfile
+        fields = ['id', 'company_name']

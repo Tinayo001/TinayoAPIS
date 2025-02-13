@@ -8,6 +8,7 @@ from rest_framework.exceptions import NotFound
 from .models import TechnicianProfile
 from account.models import User
 from rest_framework import status
+from maintenance_companies.models import MaintenanceCompanyProfile
 from rest_framework.permissions import AllowAny
 from .serializers import TechnicianProfileSerializer ,TechnicianListSerializer, TechnicianDetailSerializer, TechnicianSpecializationSerializer
 from rest_framework.permissions import AllowAny
@@ -67,38 +68,48 @@ class TechnicianDetailView(generics.RetrieveAPIView):
 
 # View for unlinked technicians
 class UnlinkTechnicianFromCompanyView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
 
-    def post(self, request, **kwargs):
-        technician_id = kwargs.get('id')
-        
-        if not technician_id:
+    def post(self, request, *args, **kwargs):
+        company_uuid = self.kwargs.get('company_uuid')
+        technician_uuid = self.kwargs.get('technician_uuid')
+
+        if not company_uuid or not technician_uuid:
             return Response(
-                {"error": "No technician ID provided"},
+                {"error": "Both company UUID and technician UUID are required"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        
-        technician = get_object_or_404(Technician, id=technician_id)
-        
-        # Check if the authenticated user's company matches the technician's company
-        if technician.maintenance_company != request.user.company:
-            raise PermissionDenied("You do not have permission to unlink this technician.")
-        
-        if not technician.maintenance_company:
+
+        company = get_object_or_404(MaintenanceCompanyProfile, id=company_uuid)
+        technician = get_object_or_404(TechnicianProfile, id=technician_uuid)
+
+        # Check if the authenticated user is associated with the same company
+        user_technician_profile = getattr(request.user, "technician_profile", None)
+
+        if not user_technician_profile:
             return Response(
-                {"error": "Technician is not linked to any maintenance company."},
+                {"error": "You are not associated with any technician profile."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        if user_technician_profile.maintenance_company != company:
+            raise PermissionDenied("You do not have permission to unlink this technician from the company.")
+
+        # Proceed to unlink technician
+        if technician.maintenance_company == company:
+            technician.maintenance_company = None
+            technician.is_approved = False
+            technician.save()
+
+            return Response(
+                {"message": "Technician successfully unlinked from maintenance company."},
+                status=status.HTTP_200_OK,
+            )
+        else:
+            return Response(
+                {"error": "Technician is not linked to the specified maintenance company."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        
-        technician.maintenance_company = None
-        technician.is_approved = False
-        technician.save()
-        
-        return Response(
-            {"message": "Technician successfully unlinked from maintenance company."},
-            status=status.HTTP_200_OK,
-        )
-
 
 # View for unlinked technicians by specialization
 class UnlinkedTechniciansBySpecializationView(generics.ListAPIView):

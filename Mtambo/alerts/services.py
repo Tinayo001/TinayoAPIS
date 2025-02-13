@@ -39,9 +39,7 @@ class AlertService:
     @classmethod
     @transaction.atomic
     def create_alert(cls, alert_type, recipient, related_object, message=None):
-        """
-        Create an alert with validation and error handling
-        """
+        """Create an alert with validation and error handling"""
         try:
             # Validate inputs
             cls.validate_alert_inputs(alert_type, recipient, related_object)
@@ -57,20 +55,29 @@ class AlertService:
                 object_id=related_object.id,
                 message=message
             )
-            
+        
+            # Verify the alert was actually saved
+            try:
+                saved_alert = Alert.objects.get(id=alert.id)
+                logger.info(
+                    f"Alert verified in database: id={saved_alert.id}, "
+                    f"type={saved_alert.alert_type}, "
+                    f"recipient={saved_alert.recipient}"
+                )
+            except Alert.DoesNotExist:
+                logger.error(f"Alert {alert.id} was created but not found in database!")
+                raise Exception("Alert creation failed - could not verify in database")
+
             logger.info(
                 f"Alert created successfully: id={alert.id}, type={alert_type}, "
                 f"recipient={recipient}, object={related_object}"
             )
-            
+        
             return alert
 
         except Exception as e:
-            logger.error(
-                f"Failed to create alert: type={alert_type}, recipient={recipient}, "
-                f"object={related_object}, error={str(e)}"
-            )
-            raise
+            logger.error(f"Failed to create alert: {str(e)}", exc_info=True)
+            raise 
 
     @classmethod
     def get_default_message(cls, alert_type, related_object):

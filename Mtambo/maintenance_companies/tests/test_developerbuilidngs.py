@@ -1,5 +1,6 @@
 import uuid
 from django.test import TestCase
+from django.urls import reverse
 from rest_framework.test import APIClient
 from rest_framework import status
 from account.models import User
@@ -7,7 +8,6 @@ from maintenance_companies.models import MaintenanceCompanyProfile
 from developers.models import DeveloperProfile
 from buildings.models import Building
 from elevators.models import Elevator
-
 
 class BuildingsUnderDeveloperViewTest(TestCase):
     def setUp(self):
@@ -98,113 +98,94 @@ class BuildingsUnderDeveloperViewTest(TestCase):
         # Initialize the APIClient
         self.client = APIClient()
 
-    def test_buildings_under_developer_view(self):
-        """
-        Test the API view that lists buildings under a specific developer and maintenance company.
-        """
-        url = f"/api/maintenance-companies/buildings/{self.maintenance_company.id}/developer/{self.developer_profile.id}/"
+    def get_url(self, company_id, developer_id):
+        """Helper method to generate the URL with proper reverse lookup"""
+        return reverse('maintenance_companies:buildings-under-developer', 
+                      kwargs={
+                          'company_id': str(company_id),
+                          'developer_id': str(developer_id)
+                      })
+
+    def test_get_buildings_success(self):
+        """Test successful retrieval of buildings"""
+        url = self.get_url(self.maintenance_company.id, self.developer_profile.id)
         response = self.client.get(url)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertIn("id", response.data[0])
         self.assertEqual(len(response.data), 2)  # Two buildings should be returned
+        
+        # Verify building data structure
+        for building in response.data:
+            self.assertIn('name', building)
+            self.assertIn('address', building)
+            self.assertIn('contact', building)
+            self.assertIn('developer', building)  # Check if 'developer' is present
+            self.assertIn('developer_name', building['developer'])  # Check 'developer_name' within the 'developer' key
 
-    def test_no_buildings_found(self):
-        """
-        Test the API view when no buildings are found for the given developer and maintenance company.
-        """
-        # Create new users for both maintenance company and developer
-        user_maintenance_no_building = User.objects.create_user(
-            email="maintenance_no_buildings@company.com",
-            phone_number="1122334455",
-            password="password123",
-            first_name="John",
-            last_name="NoBuildings",
-            account_type="maintenance"
-        )
-
-        user_developer_no_building = User.objects.create_user(
-            email="developer_no_buildings@company.com",
-            phone_number="5544332211",
-            password="password123",
-            first_name="Bill",
-            last_name="Johnson",
-            account_type="developer"
-        )
-
-        # Create new maintenance company and developer profiles with specialization
-        maintenance_company_no_building = MaintenanceCompanyProfile.objects.create(
-            user=user_maintenance_no_building,
-            company_name="No Buildings Maintenance",
-            company_address="No Address",
-            registration_number="M654321",
+    def test_get_buildings_no_buildings_found(self):
+        """Test when no buildings are found"""
+        # Create new profiles without buildings
+        new_maintenance = MaintenanceCompanyProfile.objects.create(
+            user=User.objects.create_user(
+                email="new_maintenance@test.com",
+                phone_number="9999999999",
+                password="password123",
+                account_type="maintenance"
+            ),
+            company_name="New Maintenance Co",
+            company_address="New Address",
+            registration_number="NEW123",
             specialization="Elevators"
         )
 
-        developer_no_building = DeveloperProfile.objects.create(
-            user=user_developer_no_building,
-            developer_name="No Buildings Developer",
-            address="No Address",
+        new_developer = DeveloperProfile.objects.create(
+            user=User.objects.create_user(
+                email="new_developer@test.com",
+                phone_number="8888888888",
+                password="password123",
+                account_type="developer"
+            ),
+            developer_name="New Developer",
+            address="New Address",
             specialization="Commercial"
         )
 
-        url = f"/api/maintenance-companies/buildings/{maintenance_company_no_building.id}/developer/{developer_no_building.id}/"
+        url = self.get_url(new_maintenance.id, new_developer.id)
         response = self.client.get(url)
 
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
-        self.assertEqual(response.data["message"], "No buildings found.")
+        self.assertEqual(
+            response.data["message"], 
+            "No buildings found for this developer and maintenance company."
+        )
 
-    def test_invalid_uuid(self):
-
-        """
-
-        Test the API view when an invalid UUID is provided in the URL.
-
-        """
-
-        # Test with various invalid UUID formats
-
-        invalid_uuids = [
-
-            "invalid-uuid",
-
-            "123",
-
-            "not-a-uuid",
-
-            "12345678-1234-1234-1234-12345678901g"  # invalid character
-
-        ]
-
-        for invalid_uuid in invalid_uuids:
-
-            url = f"/api/maintenance-companies/buildings/{invalid_uuid}/developer/{invalid_uuid}/"
-
-            response = self.client.get(url)
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-
-        self.assertTrue("Invalid UUID format" in response.data["error"])
-
-             
-
-    def test_maintenance_company_not_found(self):
-        """
-        Test the API view when the maintenance company doesn't exist.
-        """
-        non_existent_uuid = str(uuid.uuid4())
-        url = f"/api/maintenance-companies/buildings/{non_existent_uuid}/developer/{self.developer_profile.id}/"
+    def test_get_buildings_invalid_uuid(self):
+        """Test with invalid UUID format"""
+        response = self.client.get(
+            f"/api/maintenance-companies/not-a-uuid/developers/{self.developer_profile.id}/buildings/"
+        )
+    
+        # Check for 404 status code
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+    
+        # Since the response is a Not Found error, check the content for error message
+        self.assertIn("Not Found", response.content.decode())
+    
+    def test_get_buildings_maintenance_company_not_found(self):
+        """Test with non-existent maintenance company"""
+        non_existent_uuid = uuid.uuid4()
+        url = self.get_url(non_existent_uuid, self.developer_profile.id)
         response = self.client.get(url)
-        
+
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertEqual(response.data["error"], "Maintenance company not found.")
 
-    def test_developer_not_found(self):
-        """
-        Test the API view when the developer doesn't exist.
-        """
-        non_existent_uuid = str(uuid.uuid4())
-        url = f"/api/maintenance-companies/buildings/{self.maintenance_company.id}/developer/{non_existent_uuid}/"
+    def test_get_buildings_developer_not_found(self):
+        """Test with non-existent developer"""
+        non_existent_uuid = uuid.uuid4()
+        url = self.get_url(self.maintenance_company.id, non_existent_uuid)
         response = self.client.get(url)
-        
+
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertEqual(response.data["error"], "Developer not found.")
+

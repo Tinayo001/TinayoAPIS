@@ -1,6 +1,6 @@
 from django.utils import timezone
 import factory
-from factory import Faker,  SubFactory
+from factory import Faker, SubFactory, Sequence
 from factory.django import DjangoModelFactory
 from account.models import User
 from maintenance_companies.models import MaintenanceCompanyProfile
@@ -8,112 +8,108 @@ from technicians.models import TechnicianProfile
 from developers.models import DeveloperProfile
 from buildings.models import Building
 from elevators.models import Elevator
-from jobs.models import MaintenanceSchedule, ElevatorConditionReport, ScheduledMaintenanceLog, AdHocMaintenanceSchedule, AdHocElevatorConditionReport, AdHocMaintenanceLog, BuildingLevelAdhocSchedule, MaintenanceCheck, AdHocMaintenanceTask
+from jobs.models import (
+    MaintenanceSchedule, ElevatorConditionReport, ScheduledMaintenanceLog,
+    AdHocMaintenanceSchedule, AdHocElevatorConditionReport, AdHocMaintenanceLog,
+    BuildingLevelAdhocSchedule, MaintenanceCheck, AdHocMaintenanceTask
+)
 
 
-# Factory for User model
 class UserFactory(DjangoModelFactory):
     class Meta:
         model = User
     
     first_name = Faker('first_name')
     last_name = Faker('last_name')
-    email = Faker('email')
-    phone_number = Faker('phone_number')
-    account_type = Faker('random_element', elements=['developer', 'maintenance', 'technician'])
-    created_at = Faker('date_time_this_decade')
-    is_staff = Faker('boolean')
-    is_superuser = Faker('boolean')
+    email = Sequence(lambda n: f'user_{n}@example.com')
+    phone_number = Sequence(lambda n: f'+1555000{n:04d}')
+    account_type = factory.Iterator(['developer', 'maintenance', 'technician'])
+    created_at = factory.LazyFunction(timezone.now)
+    is_staff = False
+    is_superuser = False
     is_active = True
 
 
-# Factory for MaintenanceCompanyProfile model
 class MaintenanceCompanyProfileFactory(DjangoModelFactory):
     class Meta:
         model = MaintenanceCompanyProfile
     
-    user = factory.SubFactory(UserFactory)
-    company_name = Faker('company')
+    user = SubFactory(UserFactory, account_type='maintenance')
+    company_name = Sequence(lambda n: f'Maintenance Company {n}')
     company_address = Faker('address')
-    registration_number = Faker('uuid4')
+    registration_number = Sequence(lambda n: f'REG{n:05d}')
     specialization = Faker('word')
 
 
-# Factory for TechnicianProfile model
 class TechnicianProfileFactory(DjangoModelFactory):
     class Meta:
         model = TechnicianProfile
     
-    user = factory.SubFactory(UserFactory)
+    user = SubFactory(UserFactory, account_type='technician')
     specialization = Faker('word')
-    maintenance_company = factory.SubFactory(MaintenanceCompanyProfileFactory)
+    maintenance_company = SubFactory(MaintenanceCompanyProfileFactory)
     is_approved = True
-    created_at = Faker('date_this_decade')
-    updated_at = Faker('date_this_decade')
+    created_at = factory.LazyFunction(timezone.now)
+    updated_at = factory.LazyFunction(timezone.now)
 
 
-# Factory for DeveloperProfile model
 class DeveloperProfileFactory(DjangoModelFactory):
     class Meta:
         model = DeveloperProfile
     
-    user = factory.SubFactory(UserFactory)
-    developer_name = Faker('company')
+    user = SubFactory(UserFactory, account_type='developer')
+    developer_name = Sequence(lambda n: f'Developer Company {n}')
     address = Faker('address')
     specialization = Faker('word')
 
 
-# Factory for Building model
 class BuildingFactory(DjangoModelFactory):
     class Meta:
         model = Building
     
-    name = Faker('company')
+    name = Sequence(lambda n: f'Building {n}')
     address = Faker('address')
-    contact = Faker('phone_number')
-    developer = factory.SubFactory(DeveloperProfileFactory)
+    contact = Sequence(lambda n: f'+1555999{n:04d}')
+    developer = SubFactory(DeveloperProfileFactory)
 
 
-# Factory for Elevator model
 class ElevatorFactory(DjangoModelFactory):
     class Meta:
         model = Elevator
     
-    user_name = Faker('word')
+    user_name = Sequence(lambda n: f'Elevator {n}')
     controller_type = Faker('word')
-    machine_type = Faker('random_element', elements=['gearless', 'geared'])
-    building = factory.SubFactory(BuildingFactory)
-    machine_number = Faker('uuid4')
+    machine_type = factory.Iterator(['gearless', 'geared'])
+    building = SubFactory(BuildingFactory)
+    machine_number = Sequence(lambda n: f'MACH{n:05d}')
     capacity = Faker('random_int', min=500, max=5000)
     manufacturer = Faker('company')
-    installation_date = Faker('date_this_decade')
+    installation_date = factory.LazyFunction(lambda: timezone.now().date())
     maintenance_company = SubFactory(MaintenanceCompanyProfileFactory)
-    developer = factory.SubFactory(DeveloperProfileFactory)
-    technician = factory.SubFactory(TechnicianProfileFactory)
+    developer = SubFactory(DeveloperProfileFactory)
+    technician = SubFactory(TechnicianProfileFactory)
 
 
-# Factory for MaintenanceSchedule model
-class MaintenanceScheduleFactory(factory.django.DjangoModelFactory):
+class MaintenanceScheduleFactory(DjangoModelFactory):
     class Meta:
         model = MaintenanceSchedule
 
-    elevator = factory.SubFactory(ElevatorFactory)
-    technician = factory.SubFactory(TechnicianProfileFactory)
-    maintenance_company = factory.SubFactory(MaintenanceCompanyProfileFactory)
-    
-    scheduled_date = factory.LazyFunction(timezone.now)  # This will ensure it's a datetime
+    elevator = SubFactory(ElevatorFactory)
+    technician = SubFactory(TechnicianProfileFactory)
+    maintenance_company = SubFactory(MaintenanceCompanyProfileFactory)
+    scheduled_date = factory.LazyFunction(timezone.now)
     next_schedule = factory.Iterator(['1_month', '3_months', '6_months', 'set_date'])
-    description = factory.Faker('paragraph')
+    description = Faker('paragraph')
     status = factory.Iterator(['scheduled', 'overdue', 'completed'])
 
-# Factory for ElevatorConditionReport model
+
 class ElevatorConditionReportFactory(DjangoModelFactory):
     class Meta:
         model = ElevatorConditionReport
     
-    maintenance_schedule = factory.SubFactory(MaintenanceScheduleFactory)
-    technician = factory.SubFactory(TechnicianProfileFactory)
-    date_inspected = Faker('date_this_decade')
+    maintenance_schedule = SubFactory(MaintenanceScheduleFactory)
+    technician = SubFactory(TechnicianProfileFactory)
+    date_inspected = factory.LazyFunction(timezone.now)
     alarm_bell = Faker('word')
     noise_during_motion = Faker('word')
     cabin_lights = Faker('word')
@@ -123,15 +119,14 @@ class ElevatorConditionReportFactory(DjangoModelFactory):
     additional_comments = Faker('sentence')
 
 
-# Factory for ScheduledMaintenanceLog model
 class ScheduledMaintenanceLogFactory(DjangoModelFactory):
     class Meta:
         model = ScheduledMaintenanceLog
     
-    maintenance_schedule = factory.SubFactory(MaintenanceScheduleFactory)
-    technician = factory.SubFactory(TechnicianProfileFactory)
-    condition_report = factory.SubFactory(ElevatorConditionReportFactory)
-    date_completed = Faker('date_this_decade')
+    maintenance_schedule = SubFactory(MaintenanceScheduleFactory)
+    technician = SubFactory(TechnicianProfileFactory)
+    condition_report = SubFactory(ElevatorConditionReportFactory)
+    date_completed = factory.LazyFunction(timezone.now)
     check_machine_gear = Faker('boolean')
     check_machine_brake = Faker('boolean')
     check_controller_connections = Faker('boolean')
@@ -144,80 +139,73 @@ class ScheduledMaintenanceLogFactory(DjangoModelFactory):
     approved_by = Faker('name')
 
 
-# Factory for AdHocMaintenanceSchedule model
 class AdHocMaintenanceScheduleFactory(DjangoModelFactory):
     class Meta:
         model = AdHocMaintenanceSchedule
     
-    elevator = factory.SubFactory(ElevatorFactory)
-    technician = factory.SubFactory(TechnicianProfileFactory)
-    maintenance_company = factory.SubFactory(MaintenanceCompanyProfileFactory)
-    scheduled_date = Faker('date_this_decade')
+    elevator = SubFactory(ElevatorFactory)
+    technician = SubFactory(TechnicianProfileFactory)
+    maintenance_company = SubFactory(MaintenanceCompanyProfileFactory)
+    scheduled_date = factory.LazyFunction(timezone.now)
     description = Faker('sentence')
-    status = Faker('random_element', elements=['scheduled', 'overdue', 'completed'])
+    status = factory.Iterator(['scheduled', 'overdue', 'completed'])
 
 
-# Factory for AdHocElevatorConditionReport model
 class AdHocElevatorConditionReportFactory(DjangoModelFactory):
     class Meta:
         model = AdHocElevatorConditionReport
     
-    ad_hoc_schedule = factory.SubFactory(AdHocMaintenanceScheduleFactory)
-    technician = factory.SubFactory(TechnicianProfileFactory)
-    date_inspected = Faker('date_this_decade')
+    ad_hoc_schedule = SubFactory(AdHocMaintenanceScheduleFactory)
+    technician = SubFactory(TechnicianProfileFactory)
+    date_inspected = factory.LazyFunction(timezone.now)
     components_checked = Faker('sentence')
     condition = Faker('sentence')
 
 
-# Factory for AdHocMaintenanceLog model
 class AdHocMaintenanceLogFactory(DjangoModelFactory):
     class Meta:
         model = AdHocMaintenanceLog
     
-    ad_hoc_schedule = factory.SubFactory(AdHocMaintenanceScheduleFactory)
-    technician = factory.SubFactory(TechnicianProfileFactory)
-    condition_report = factory.SubFactory(AdHocElevatorConditionReportFactory)
-    date_completed = Faker('date_this_decade')
+    ad_hoc_schedule = SubFactory(AdHocMaintenanceScheduleFactory)
+    technician = SubFactory(TechnicianProfileFactory)
+    condition_report = SubFactory(AdHocElevatorConditionReportFactory)
+    date_completed = factory.LazyFunction(timezone.now)
     summary_title = Faker('sentence')
     description = Faker('sentence')
     overseen_by = Faker('name')
     approved_by = Faker('name')
 
 
-# Factory for BuildingLevelAdhocSchedule model
 class BuildingLevelAdhocScheduleFactory(DjangoModelFactory):
     class Meta:
         model = BuildingLevelAdhocSchedule
     
-    building = factory.SubFactory(BuildingFactory)
-    technician = factory.SubFactory(TechnicianProfileFactory)
-    maintenance_company = factory.SubFactory(MaintenanceCompanyProfileFactory)
-    scheduled_date = Faker('date_this_decade')
+    building = SubFactory(BuildingFactory)
+    technician = SubFactory(TechnicianProfileFactory)
+    maintenance_company = SubFactory(MaintenanceCompanyProfileFactory)
+    scheduled_date = factory.LazyFunction(timezone.now)
     description = Faker('sentence')
-    status = Faker('random_element', elements=['scheduled', 'overdue', 'completed'])
+    status = factory.Iterator(['scheduled', 'overdue', 'completed'])
 
 
-# Factory for MaintenanceCheck model
 class MaintenanceCheckFactory(DjangoModelFactory):
     class Meta:
         model = MaintenanceCheck
     
-    maintenance_schedule = factory.SubFactory(MaintenanceScheduleFactory)
+    maintenance_schedule = SubFactory(MaintenanceScheduleFactory)
     task_description = Faker('sentence')
     passed = Faker('boolean')
     comments = Faker('sentence')
 
 
-# Factory for AdHocMaintenanceTask model
 class AdHocMaintenanceTaskFactory(DjangoModelFactory):
     class Meta:
         model = AdHocMaintenanceTask
     
     description = Faker('sentence')
-    created_by = factory.SubFactory(MaintenanceCompanyProfileFactory)
-    assigned_to = factory.SubFactory(TechnicianProfileFactory)
-    created_at = Faker('date_this_decade')
-    scheduled_date = Faker('date_this_decade')
+    created_by = SubFactory(MaintenanceCompanyProfileFactory)
+    assigned_to = SubFactory(TechnicianProfileFactory)
+    created_at = factory.LazyFunction(timezone.now)
+    scheduled_date = factory.LazyFunction(timezone.now)
     completed = Faker('boolean')
     comments = Faker('sentence')
-

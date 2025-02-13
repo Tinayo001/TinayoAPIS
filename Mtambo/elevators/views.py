@@ -1,4 +1,5 @@
 from django.http import Http404
+from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiExample
 from rest_framework.generics import RetrieveAPIView 
 from django.shortcuts import get_object_or_404
 from rest_framework import status
@@ -20,9 +21,14 @@ from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import OrderingFilter
-
-
+from .models import ElevatorIssueLog
+from django.utils import timezone
 from rest_framework.generics import ListAPIView
+
+from .serializers import ElevatorIssueLogSerializer
+from jobs.serializers import AdHocMaintenanceScheduleSerializer
+from jobs.models import AdHocMaintenanceSchedule
+from django.db.models import Q
 
 logger = logging.getLogger(__name__)
 
@@ -320,4 +326,193 @@ class DeleteElevatorView(DestroyAPIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
+class LogElevatorIssueView(APIView):
+    """
+    Log an issue for a specific elevator.
+    If an urgency message is provided, a maintenance schedule will be created.
+    """
+    permission_classes = [AllowAny]
 
+    @swagger_auto_schema(
+        operation_description="Log an issue for a specific elevator. If an 'Urgency' message is provided, an ad-hoc maintenance schedule is created.",
+        manual_parameters=[
+            openapi.Parameter(
+                'elevator_id',
+                openapi.IN_PATH,
+                description="UUID of the elevator",
+                type=openapi.TYPE_STRING,
+                format=openapi.FORMAT_UUID,
+                required=True
+            ),
+        ],
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=['issue_description'],
+            properties={
+                'issue_description': openapi.Schema(
+                    type=openapi.TYPE_STRING,
+                    description="Detailed description of the elevator issue",
+                    example="The elevator is stuck between floors."
+                ),
+                'Urgency': openapi.Schema(
+                    type=openapi.TYPE_STRING,
+                    description="Specify if urgent action is required",
+                    example="Technician needed urgently"
+                )
+            }
+        ),
+        responses={
+            201: openapi.Response(
+                description="Issue logged successfully",
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        "message": openapi.Schema(type=openapi.TYPE_STRING, example="Issue logged successfully."),
+                        "issue_id": openapi.Schema(type=openapi.TYPE_STRING, format=openapi.FORMAT_UUID, example="550e8400-e29b-41d4-a716-446655440000"),
+                        "maintenance_schedule_id": openapi.Schema(type=openapi.TYPE_STRING, format=openapi.FORMAT_UUID, example="850e8400-e29b-41d4-a716-446655440123")
+                    }
+                )
+            ),
+            400: openapi.Response(
+                description="Bad Request - Invalid input data",
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        "detail": openapi.Schema(type=openapi.TYPE_STRING, example="Issue description is required.")
+                    }
+                )
+            ),
+            404: openapi.Response(
+                description="Not Found - Elevator does not exist",
+                schema=openapi.Schema(
+                    type=openapi.TYPE_OBJECT,
+                    properties={
+                        "detail": openapi.Schema(type=openapi.TYPE_STRING, example="Elevator not found.")
+                    }
+                )
+            ),
+        }
+    )
+    def put(self, request, elevator_id, *args, **kwargs):
+        # Validate elevator ID
+        try:
+            elevator_uuid = uuid.UUID(str(elevator_id))
+        except ValueError:
+            return Response({"detail": "Invalid elevator ID format. Must be a valid UUID."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Fetch elevator
+        try:
+            elevator = Elevator.objects.get(id=elevator_uuid)
+        except Elevator.DoesNotExist:
+            return Response({"detail": "Elevator not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        # Extract issue description
+        issue_description = request.data.get('issue_description')
+        if not issue_description:
+            return Response({"detail": "Issue description is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Create ElevatorIssueLog entry
+        issue_log = ElevatorIssueLog.objects.create(
+            elevator=elevator,
+            developer=elevator.developer,
+            building=elevator.building,
+            issue_description=issue_description
+        )
+
+        # Handle urgency message and create an ad-hoc maintenance schedule
+        urgency_message = request.data.get('Urgency', None)
+        if urgency_message:
+            # Ensure technician exists
+            if not elevator.technician:
+                return Response({"detail": "No technician assigned to this elevator. Cannot create maintenance schedule."}, status=status.HTTP_400_BAD_REQUEST)
+
+            maintenance_description = f"A system-generated maintenance schedule based on a Logged Elevator Issue of {timezone.now().date()}, the description of the issue is: {issue_description}"
+
+            # Create maintenance schedule (ensuring technician exists)
+            schedule = AdHocMaintenanceSchedule.objects.create(
+                elevator=elevator,
+                maintenance_company=elevator.maintenance_company if elevator.maintenance_company else None,
+                technician=elevator.technician,  # Required field
+                scheduled_date=timezone.now(),
+                description=maintenance_description
+            )
+
+            return Response({
+                "message": "Issue logged and ad-hoc maintenance schedule created successfully.",
+                "issue_id": str(issue_log.id),
+                "maintenance_schedule_id": str(schedule.id)
+            }, status=status.HTTP_201_CREATED)
+
+        # Return success response if no urgency message is provided
+        return Response({
+            "message": "Issue logged successfully.",
+            "issue_id": str(issue_log.id)
+        }, status=status.HTTP_201_CREATED)
+
+
+class LoggedElevatorIssuesView(APIView):
+    """
+    List all the logged issues for a specific elevator.
+    """
+    permission_classes = [AllowAny]  # Adjust permissions as needed
+
+    def get(self, request, elevator_id, *args, **kwargs):
+        """
+        Get a list of all issues logged for a specific elevator.
+        """
+        # Retrieve the elevator by UUID
+        elevator = get_object_or_404(Elevator, id=elevator_id)
+
+        # Get all logged issues for this elevator
+        issues = ElevatorIssueLog.objects.filter(elevator=elevator)
+
+        # If no issues are found, return a message
+        if not issues.exists():
+            return Response({"detail": "No issues logged for this elevator."}, status=status.HTTP_404_NOT_FOUND)
+
+        # Serialize the issues data
+        serializer = ElevatorIssueLogSerializer(issues, many=True)
+
+        # Return the list of logged issues
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+class ElevatorWithRunningSchedulesView(APIView):
+    permission_classes = [AllowAny]  # Adjust permission as necessary
+
+    def get(self, request, *args, **kwargs):
+        """
+        List all elevators that have a running scheduled maintenance for today or in the future.
+        """
+        # We need to filter elevators that have a maintenance schedule with a scheduled date today or in the future
+        elevators_with_schedules = Elevator.objects.filter(
+            maintenance_schedules__scheduled_date__gte=timezone.now().date(),  # Include today or future dates
+            maintenance_schedules__status="scheduled"  # Only include scheduled maintenance
+        ).distinct()  # Remove duplicate entries for the same elevator
+
+        # Serialize the elevator data
+        serializer = ElevatorSerializer(elevators_with_schedules, many=True)
+
+        # Return the serialized data in the response
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+class ElevatorWithoutRunningSchedulesView(APIView):
+    permission_classes = [AllowAny]  # Adjust permission as necessary
+
+    def get(self, request, *args, **kwargs):
+        # Get today's date
+        today = timezone.now().date()
+
+        # Find all elevators that do not have maintenance schedules scheduled for today or in the future
+        elevators_without_schedules = Elevator.objects.filter(
+            ~Q(maintenance_schedules__scheduled_date__gte=today)
+        ).distinct()
+
+        # If no elevators are found, return 404 not found
+        if not elevators_without_schedules:
+            raise NotFound(detail="No elevators without running schedules found.")
+
+        # Serialize the elevator data using ElevatorSerializer
+        serializer = ElevatorSerializer(elevators_without_schedules, many=True)
+
+        # Return the serialized data in the response
+        return Response(serializer.data, status=status.HTTP_200_OK)

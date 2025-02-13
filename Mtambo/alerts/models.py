@@ -19,6 +19,8 @@ class AlertType(models.TextChoices):
     BUILDING_REGISTERED = 'BUILDING_REG', _('Building Registered')
     SCHEDULE_OVERDUE = 'SCHEDULE_OVERDUE', _('Schedule Overdue') 
     ADHOC_MAINTENANCE_SCHEDULED = 'ADHOC_SCHEDULED', _('Ad-Hoc Maintenance Scheduled')
+    TECHNICIAN_UPDATED_FOR_BUILDING = 'TECH_UPDATED_BUILDING', _('Technician Updated for Building')
+    MAINTENANCE_APPROVAL_NEEDED = 'MAINTENANCE_APPROVAL', _('Maintenance Approval Needed')
 
 
 class Alert(models.Model):

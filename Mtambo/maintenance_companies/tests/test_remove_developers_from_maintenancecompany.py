@@ -1,4 +1,5 @@
 from django.test import TestCase
+from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APIClient
 from uuid import uuid4
@@ -101,14 +102,9 @@ class RemoveMaintenanceFromDeveloperElevatorsViewTest(TestCase):
         self.client = APIClient()
 
     def test_remove_maintenance_from_developer_elevators(self):
-        # Get the UUIDs for the company and developer
-        company_id = self.maintenance_company.id
-        developer_id = self.developer_profile_1.id
-
-        # Construct the URL
-        url = f'/api/maintenance-companies/remove-maintenance-from-developer-elevators/{company_id}/{developer_id}/'
-
-        # Perform the DELETE request
+        url = reverse('maintenance_companies:remove-maintenance-from-developer-elevators', 
+                     kwargs={'company_id': self.maintenance_company.id,
+                            'developer_id': self.developer_profile_1.id})
         response = self.client.delete(url)
 
         # Verify the response status
@@ -137,18 +133,13 @@ class RemoveMaintenanceFromDeveloperElevatorsViewTest(TestCase):
 
         # Create a new developer with no buildings
         new_developer = DeveloperProfile.objects.create(
-            user=user_developer_3,  # Use the new user
+            user=user_developer_3,
             developer_name="No Buildings Developer"
         )
 
-        # Get the UUIDs for the company and new developer
-        company_id = self.maintenance_company.id
-        developer_id = new_developer.id
-
-        # Construct the URL
-        url = f'/api/maintenance-companies/remove-maintenance-from-developer-elevators/{company_id}/{developer_id}/'
-
-        # Perform the DELETE request
+        url = reverse('maintenance_companies:remove-maintenance-from-developer-elevators', 
+                     kwargs={'company_id': self.maintenance_company.id,
+                            'developer_id': new_developer.id})
         response = self.client.delete(url)
 
         # Verify the response status and message
@@ -179,39 +170,28 @@ class RemoveMaintenanceFromDeveloperElevatorsViewTest(TestCase):
             developer=new_developer
         )
 
-        company_id = self.maintenance_company.id
-        developer_id = new_developer.id
-        url = f'/api/maintenance-companies/remove-maintenance-from-developer-elevators/{company_id}/{developer_id}/'
+        url = reverse('maintenance_companies:remove-maintenance-from-developer-elevators', 
+                     kwargs={'company_id': self.maintenance_company.id,
+                            'developer_id': new_developer.id})
         response = self.client.delete(url)
+        
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
-        self.assertIn("No elevators found for this developer.", response.data['message'])  # Updated message
+        self.assertIn("No elevators found for this developer.", response.data['message'])
     
     def test_invalid_maintenance_company(self):
-        # Use a random UUID that doesn't exist in the database
-        company_id = uuid4()  # Random UUID
-        developer_id = self.developer_profile_1.id
-
-        # Construct the URL
-        url = f'/api/maintenance-companies/remove-maintenance-from-developer-elevators/{company_id}/{developer_id}/'
-
-        # Perform the DELETE request
+        url = reverse('maintenance_companies:remove-maintenance-from-developer-elevators', 
+                     kwargs={'company_id': uuid4(),
+                            'developer_id': self.developer_profile_1.id})
         response = self.client.delete(url)
 
-        # Verify the response status and message
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertIn("Maintenance company not found", response.data['error'])
 
     def test_invalid_developer(self):
-        # Use a random UUID that doesn't exist in the database
-        company_id = self.maintenance_company.id
-        developer_id = uuid4()  # Random UUID
-
-        # Construct the URL
-        url = f'/api/maintenance-companies/remove-maintenance-from-developer-elevators/{company_id}/{developer_id}/'
-
-        # Perform the DELETE request
+        url = reverse('maintenance_companies:remove-maintenance-from-developer-elevators', 
+                     kwargs={'company_id': self.maintenance_company.id,
+                            'developer_id': uuid4()})
         response = self.client.delete(url)
 
-        # Verify the response status and message
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertIn("Developer not found", response.data['error'])
