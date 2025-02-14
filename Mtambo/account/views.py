@@ -23,6 +23,11 @@ from typing import Dict, List, Tuple, Optional, Any
 from alerts.models import AlertType
 from alerts.services import AlertService
 from alerts.models import Alert
+from brokers.models import BrokerUser
+from brokers.models import BrokerReferral
+from brokers.models import BrokerUserManager
+from payments.models import PaymentSettings
+from maintenance_companies.serializers import MaintenanceCompanyProfileSerializer
 
 import logging
 logger = logging.getLogger(__name__)
@@ -39,61 +44,139 @@ class SignUpView(APIView):
             if user_serializer.is_valid(raise_exception=True):
                 user = user_serializer.save()
                 
-                # Determine user type and create corresponding profile
-                user_type = request.data.get('user_type')
+                # Check account_type since that's what your request uses
+                account_type = request.data.get('account_type')
                 
-                if user_type == 'maintenance_company':
+                if account_type == 'maintenance':
                     return self.create_maintenance_profile(request, user)
-                elif user_type == 'technician':
+                elif account_type == 'technician':
                     return self.create_technician_profile(request, user)
-                elif user_type == 'developer':
+                elif account_type == 'developer':
                     return self.create_developer_profile(request, user)
                 
                 return Response(user_serializer.data, status=status.HTTP_201_CREATED)
         
-        except serializers.ValidationError as ve:
-            logger.error(f"Validation error in user signup: {ve}")
-            return Response(ve.detail, status=status.HTTP_400_BAD_REQUEST)
-        
         except Exception as e:
-            logger.exception(f"Complete signup error: {e}")
+            logger.exception(f"Signup error: {e}")
             return Response(
                 {"error": "Signup failed", "details": str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            ) 
-    @swagger_auto_schema(request_body=MaintenanceCompanyProfileSerializer)
-    def create_maintenance_profile(self, request, user):
+            )
+
+    def create_maintenance_profile(self, request, user, referral_code=None):
+        # Get referral code from request data if not passed directly
+        if not referral_code:
+            referral_code = request.data.get('referral_code')
+    
+        logger.info(f"DEBUG: Starting profile creation with referral_code: {referral_code}")
+    
+        # Handle the maintenance user profile creation
         company_name = request.data.get("company_name")
         company_address = request.data.get("company_address")
-        registration_number = request.data.get("registration_number")  # Changed from company_registration_number
+        company_registration_number = request.data.get("registration_number")
         specialization_name = request.data.get("specialization")
-    
-        if not all([company_name, company_address, registration_number, specialization_name]):
+
+        if not all([company_name, company_address, company_registration_number, specialization_name]):
+            logger.error("Missing required fields")
             return Response(
                 {"error": "All fields are required for the Maintenance profile."},
                 status=status.HTTP_400_BAD_REQUEST
             )
+
         try:
-            maintenance_profile, created = MaintenanceCompanyProfile.objects.get_or_create(
-                user=user,
-                defaults={
-                    'company_name': company_name,
-                    'company_address': company_address,
-                    'registration_number': registration_number,  # Changed field name
-                    'specialization': specialization_name
-                }
-            )
+            # Create or update the Maintenance profile
+            maintenance_profile, created = MaintenanceCompanyProfile.objects.get_or_create(user=user)
+            maintenance_profile.company_name = company_name
+            maintenance_profile.company_address = company_address
+            maintenance_profile.company_registration_number = company_registration_number
+            maintenance_profile.specialization = specialization_name
+            maintenance_profile.save()
         
+            logger.info(f"DEBUG: Maintenance profile created/updated: {maintenance_profile.id}")
+
+            # Step 2: Process the referral if referral_code is provided
+            if referral_code:
+                logger.info(f"DEBUG: Processing referral code: {referral_code}")
+            
+                # Look for the broker using the referral code
+                broker = BrokerUser.objects.filter(referral_code=referral_code).first()
+            
+                if not broker:
+                    logger.error(f"Broker not found for referral code: {referral_code}")
+                    return Response(
+                        {"error": f"Invalid referral code: {referral_code}"},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                logger.info(f"DEBUG: Found broker: {broker.email}")
+
+                # Check for existing referral
+                existing_referral = BrokerReferral.objects.filter(
+                    maintenance_company=maintenance_profile
+                ).exists()
+
+                if existing_referral:
+                    logger.warning(f"Maintenance company already has a referral")
+                    return Response(
+                        {"error": "This maintenance company already has a broker referral."},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                try:
+                    # Get commission values from PaymentSettings if they exist, otherwise use broker defaults
+                    payment_settings = PaymentSettings.objects.first()
+                    if payment_settings:
+                        commission_percentage = payment_settings.default_commission
+                        commission_duration_months = payment_settings.default_commission_duration
+                    else:
+                        # Use broker's default values from the model
+                        commission_percentage = broker.commission_percentage
+                        commission_duration_months = broker.commission_duration_months
+                        logger.info(f"Using broker default values: {commission_percentage}% for {commission_duration_months} months")
+
+                    # Create the referral entry
+                    referral = BrokerReferral.objects.create(
+                        broker=broker,
+                        maintenance_company=maintenance_profile,
+                        commission_percentage=commission_percentage,
+                        commission_duration_months=commission_duration_months,
+                    )
+                
+                    logger.info(f"DEBUG: Successfully created broker referral with ID: {referral.id}")
+
+                    return Response({
+                        "user": UserSerializer(user).data,
+                        "maintenance_profile": MaintenanceCompanyProfileSerializer(maintenance_profile).data,
+                        "broker_referral": {
+                            "id": str(referral.id),
+                            "broker_email": broker.email,
+                            "commission_percentage": float(commission_percentage),
+                            "commission_duration_months": commission_duration_months
+                        },
+                        "message": f"Successfully registered under broker {broker.email} with commission rate of {commission_percentage}%."
+                    }, status=status.HTTP_201_CREATED)
+
+                except Exception as e:
+                    logger.error(f"Failed to create broker referral: {str(e)}")
+                    return Response(
+                        {"error": f"Failed to create broker referral: {str(e)}"},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                    )
+
+            # If no referral code or referral processing failed
             return Response({
                 "user": UserSerializer(user).data,
-                "maintenance_profile": MaintenanceCompanyProfileSerializer(maintenance_profile).data
+                "maintenance_profile": MaintenanceCompanyProfileSerializer(maintenance_profile).data,
+                "message": "Successfully registered maintenance company without a referral."
             }, status=status.HTTP_201_CREATED)
-        
+
         except Exception as e:
+            logger.error(f"Error in profile creation: {str(e)}")
             return Response(
-                {"error": f"Error creating profile: {str(e)}"},
-                status=status.HTTP_400_BAD_REQUEST
+                {"error": f"Failed to create maintenance profile: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
     @swagger_auto_schema(request_body=TechnicianProfileSerializer)
     def create_technician_profile(self, request, user):
         try:

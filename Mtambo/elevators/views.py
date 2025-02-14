@@ -29,6 +29,8 @@ from .serializers import ElevatorIssueLogSerializer
 from jobs.serializers import AdHocMaintenanceScheduleSerializer
 from jobs.models import AdHocMaintenanceSchedule
 from django.db.models import Q
+from alerts.models import AlertType
+from alerts.services import AlertService
 
 logger = logging.getLogger(__name__)
 
@@ -328,7 +330,7 @@ class DeleteElevatorView(DestroyAPIView):
 
 class LogElevatorIssueView(APIView):
     """
-    Log an issue for a specific elevator.
+    Log an issue for a specific elevator and notify relevant parties.
     If an urgency message is provided, a maintenance schedule will be created.
     """
     permission_classes = [AllowAny]
@@ -367,30 +369,15 @@ class LogElevatorIssueView(APIView):
                 schema=openapi.Schema(
                     type=openapi.TYPE_OBJECT,
                     properties={
-                        "message": openapi.Schema(type=openapi.TYPE_STRING, example="Issue logged successfully."),
-                        "issue_id": openapi.Schema(type=openapi.TYPE_STRING, format=openapi.FORMAT_UUID, example="550e8400-e29b-41d4-a716-446655440000"),
-                        "maintenance_schedule_id": openapi.Schema(type=openapi.TYPE_STRING, format=openapi.FORMAT_UUID, example="850e8400-e29b-41d4-a716-446655440123")
+                        "message": openapi.Schema(type=openapi.TYPE_STRING),
+                        "issue_id": openapi.Schema(type=openapi.TYPE_STRING, format=openapi.FORMAT_UUID),
+                        "maintenance_schedule_id": openapi.Schema(type=openapi.TYPE_STRING, format=openapi.FORMAT_UUID),
+                        "alerts": openapi.Schema(type=openapi.TYPE_ARRAY, items=openapi.Schema(type=openapi.TYPE_STRING))
                     }
                 )
             ),
-            400: openapi.Response(
-                description="Bad Request - Invalid input data",
-                schema=openapi.Schema(
-                    type=openapi.TYPE_OBJECT,
-                    properties={
-                        "detail": openapi.Schema(type=openapi.TYPE_STRING, example="Issue description is required.")
-                    }
-                )
-            ),
-            404: openapi.Response(
-                description="Not Found - Elevator does not exist",
-                schema=openapi.Schema(
-                    type=openapi.TYPE_OBJECT,
-                    properties={
-                        "detail": openapi.Schema(type=openapi.TYPE_STRING, example="Elevator not found.")
-                    }
-                )
-            ),
+            400: "Bad Request",
+            404: "Not Found"
         }
     )
     def put(self, request, elevator_id, *args, **kwargs):
@@ -398,18 +385,21 @@ class LogElevatorIssueView(APIView):
         try:
             elevator_uuid = uuid.UUID(str(elevator_id))
         except ValueError:
-            return Response({"detail": "Invalid elevator ID format. Must be a valid UUID."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": "Invalid elevator ID format. Must be a valid UUID."}, 
+                          status=status.HTTP_400_BAD_REQUEST)
 
         # Fetch elevator
         try:
             elevator = Elevator.objects.get(id=elevator_uuid)
         except Elevator.DoesNotExist:
-            return Response({"detail": "Elevator not found."}, status=status.HTTP_404_NOT_FOUND)
+            return Response({"detail": "Elevator not found."}, 
+                          status=status.HTTP_404_NOT_FOUND)
 
         # Extract issue description
         issue_description = request.data.get('issue_description')
         if not issue_description:
-            return Response({"detail": "Issue description is required."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": "Issue description is required."}, 
+                          status=status.HTTP_400_BAD_REQUEST)
 
         # Create ElevatorIssueLog entry
         issue_log = ElevatorIssueLog.objects.create(
@@ -419,36 +409,85 @@ class LogElevatorIssueView(APIView):
             issue_description=issue_description
         )
 
-        # Handle urgency message and create an ad-hoc maintenance schedule
-        urgency_message = request.data.get('Urgency', None)
-        if urgency_message:
-            # Ensure technician exists
-            if not elevator.technician:
-                return Response({"detail": "No technician assigned to this elevator. Cannot create maintenance schedule."}, status=status.HTTP_400_BAD_REQUEST)
+        created_alerts = []
+        maintenance_schedule_id = None
 
-            maintenance_description = f"A system-generated maintenance schedule based on a Logged Elevator Issue of {timezone.now().date()}, the description of the issue is: {issue_description}"
+        try:
+            # Create alert for technician if assigned
+            if elevator.technician:
+                tech_alert = AlertService.create_alert(
+                    alert_type=AlertType.LOG_ADDED,
+                    recipient=elevator.technician,
+                    related_object=issue_log,
+                    message=f"New issue reported for elevator {elevator.machine_number} "
+                           f"in building {elevator.building.name}: {issue_description}"
+                )
+                created_alerts.append(str(tech_alert.id))
 
-            # Create maintenance schedule (ensuring technician exists)
-            schedule = AdHocMaintenanceSchedule.objects.create(
-                elevator=elevator,
-                maintenance_company=elevator.maintenance_company if elevator.maintenance_company else None,
-                technician=elevator.technician,  # Required field
-                scheduled_date=timezone.now(),
-                description=maintenance_description
+            # Create alert for maintenance company
+            if elevator.maintenance_company:
+                company_alert = AlertService.create_alert(
+                    alert_type=AlertType.LOG_ADDED,
+                    recipient=elevator.maintenance_company,
+                    related_object=issue_log,
+                    message=f"New issue reported for elevator {elevator.machine_number} "
+                           f"in building {elevator.building.name}: {issue_description}"
+                )
+                created_alerts.append(str(company_alert.id))
+
+            # Handle urgency message and create an ad-hoc maintenance schedule
+            urgency_message = request.data.get('Urgency')
+            if urgency_message:
+                if not elevator.technician:
+                    return Response(
+                        {"detail": "No technician assigned to this elevator. Cannot create maintenance schedule."}, 
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                maintenance_description = (
+                    f"Urgent maintenance needed: {issue_description}\n"
+                    f"Reported on: {timezone.now().date()}"
+                )
+
+                # Create maintenance schedule
+                schedule = AdHocMaintenanceSchedule.objects.create(
+                    elevator=elevator,
+                    maintenance_company=elevator.maintenance_company,
+                    technician=elevator.technician,
+                    scheduled_date=timezone.now(),
+                    description=maintenance_description
+                )
+                maintenance_schedule_id = str(schedule.id)
+
+                # Create alert for ad-hoc maintenance schedule
+                schedule_alert = AlertService.create_alert(
+                    alert_type=AlertType.ADHOC_MAINTENANCE_SCHEDULED,
+                    recipient=elevator.technician,
+                    related_object=schedule,
+                    message=f"Urgent maintenance schedule created for elevator "
+                           f"{elevator.machine_number} in building {elevator.building.name}"
+                )
+                created_alerts.append(str(schedule_alert.id))
+
+        except Exception as e:
+            return Response(
+                {"detail": f"Error creating alerts: {str(e)}"}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-            return Response({
-                "message": "Issue logged and ad-hoc maintenance schedule created successfully.",
-                "issue_id": str(issue_log.id),
-                "maintenance_schedule_id": str(schedule.id)
-            }, status=status.HTTP_201_CREATED)
-
-        # Return success response if no urgency message is provided
-        return Response({
+        response_data = {
             "message": "Issue logged successfully.",
-            "issue_id": str(issue_log.id)
-        }, status=status.HTTP_201_CREATED)
+            "issue_id": str(issue_log.id),
+            "alerts": created_alerts
+        }
 
+        if maintenance_schedule_id:
+            response_data.update({
+                "message": "Issue logged and ad-hoc maintenance schedule created successfully.",
+                "maintenance_schedule_id": maintenance_schedule_id
+            })
+
+        return Response(response_data, status=status.HTTP_201_CREATED)
 
 class LoggedElevatorIssuesView(APIView):
     """

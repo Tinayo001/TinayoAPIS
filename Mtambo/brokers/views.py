@@ -10,6 +10,10 @@ from .models import *
 from maintenance_companies.serializers import MaintenanceCompanyProfile, MaintenanceCompanyProfileSerializer, MaintenanceListSerializer
 from django.shortcuts import get_object_or_404
 
+import logging
+logger = logging.getLogger(__name__)
+
+
 class BrokerRegistrationView(APIView):
     """
     API endpoint for broker registration.
@@ -104,41 +108,23 @@ class BrokerListView(APIView):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
-class MaintenanceCompaniesListView(APIView):
-    """
-    List all maintenance companies registered under a specific broker.
-    If the broker doesn't exist or if there are no registered maintenance companies,
-    appropriate messages will be returned.
-    """
-    permission_classes = [AllowAny]
-
-    def get(self, request, broker_id: uuid.UUID):
-        # Step 1: Get the broker by broker_id (UUID), or return a 404 if the broker doesn't exist
-        broker = get_object_or_404(BrokerUser, id=broker_id)
-
-        # Step 2: Retrieve all maintenance companies registered under this broker
-        # The BrokerReferral model links brokers and maintenance companies via UUID
-        broker_referrals = BrokerReferral.objects.filter(broker=broker)
-
-        # Step 3: Check if the broker has any maintenance companies registered
-        if not broker_referrals.exists():
-            return Response(
-                {"message": f"No maintenance companies are registered under broker with ID {broker_id}."},
-                status=status.HTTP_200_OK  # Return 200 OK since it's a valid request, just no data
+class BrokerMaintenanceCompaniesView(APIView):
+    def get(self, request, broker_id):
+        try:
+            # Using the correct relationship path through referral
+            maintenance_companies = MaintenanceCompanyProfile.objects.filter(
+                referral__broker_id=broker_id
             )
-
-        # Step 4: Collect the maintenance companies associated with the broker
-        maintenance_companies = [referral.maintenance_company for referral in broker_referrals]
-        
-        # Step 5: Serialize the maintenance companies using the appropriate serializer
-        serialized_maintenance_companies = MaintenanceCompanyProfileSerializer(maintenance_companies, many=True)
-
-        return Response(
-            {
-                "broker_id": broker.id,  # Return the broker's UUID as an identifier
-                "broker_email": broker.email,  # Include the broker's email for additional identification
-                "broker_referral_code": broker.referral_code,  # Include referral code
-                "maintenance_companies": serialized_maintenance_companies.data
-            },
-            status=status.HTTP_200_OK
-        )
+            
+            if not maintenance_companies.exists():
+                return Response({
+                    "message": f"No maintenance companies are registered under broker with ID {broker_id}."
+                })
+            serializer = MaintenanceCompanyProfileSerializer(maintenance_companies, many=True)
+            return Response(serializer.data)
+        except Exception as e:
+            logger.exception("Error fetching broker's maintenance companies")
+            return Response(
+                {"error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )

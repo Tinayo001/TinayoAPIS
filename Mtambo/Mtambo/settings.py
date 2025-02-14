@@ -74,6 +74,7 @@ INSTALLED_APPS = [
     'jobs',
     'alerts',
     'brokers',
+    'payments',
     'django_celery_beat',
     'django_celery_results',
     'django_filters',
